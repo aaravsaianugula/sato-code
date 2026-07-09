@@ -1,0 +1,333 @@
+name: sato-build
+
+# Sato-Code release build.
+#
+# Produces branded, skin-embedded CLI binaries for BOTH platforms Sato Desktop
+# needs to pin — `linux-x64` (WSL sidecar) and `windows-x64` (Windows fallback).
+# Emits a `manifest.json` (filename + sha256 + size + upstream anchor + sato
+# version) that `sato-code.pin.json` can be regenerated from.
+#
+# Triggers:
+#   - Push of a `sato-v*` tag (the normal release path).
+#   - workflow_dispatch (manual — for smoke or emergency rebuilds).
+#
+# Notes:
+#   - We build via `scripts/build-sato.sh` on both runners so the two artifacts
+#     really come from the same pipeline (apply-patches + branded --define +
+#     skin-embedded --single).
+#   - The linux runner produces `dist/opencode-linux-x64/bin/opencode`.
+#     The windows runner produces `dist/opencode-windows-x64/bin/opencode.exe`.
+#     upstream's build.ts targets these dist paths natively.
+#   - There is intentionally NO Azure code-signing here. Upstream signs; we do
+#     not have Sato signing infrastructure yet. Add before shipping to end users.
+
+on:
+  push:
+    tags:
+      - "sato-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Sato version (e.g. 1.17.15+sato.1) — required for manual runs"
+        required: true
+        type: string
+      channel:
+        description: "Release channel (dev|beta|prod)"
+        required: false
+        type: string
+        default: "dev"
+      publish_release:
+        description: "Create a GitHub Release (true) or upload artifacts only (false)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # needed to create the Release
+  id-token: none
+
+concurrency:
+  group: sato-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            host: ubuntu-latest
+            bin_glob: "packages/opencode/dist/opencode-linux-x64/bin/opencode"
+            archive_ext: "tar.gz"
+          - name: windows-x64
+            host: windows-latest
+            bin_glob: "packages/opencode/dist/opencode-windows-x64/bin/opencode.exe"
+            archive_ext: "zip"
+    runs-on: ${{ matrix.host }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fetch upstream tags (anchor resolution)
+        run: |
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            git remote add upstream https://github.com/anomalyco/opencode.git
+          fi
+          git fetch upstream --tags
+
+      - name: Install linux native build prereqs
+        if: matrix.name == 'linux-x64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3 python3-setuptools unzip
+
+      # windows-latest already ships MSVC + Python + unzip. bun install handles
+      # node-gyp inline via the composite action.
+
+      - name: Setup Bun + install deps
+        uses: ./.github/actions/setup-bun
+
+      - name: Configure git identity (for git am)
+        run: |
+          git config --global user.email "sato-build@users.noreply.github.com"
+          git config --global user.name  "sato-build"
+
+      - name: Determine Sato version
+        id: version
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MANUAL_VERSION:-}" ]; then
+            V="$MANUAL_VERSION"
+          else
+            # Tag format: sato-v<upstream>+sato.<n>   e.g. sato-v1.17.15+sato.1
+            TAG_REF="${GITHUB_REF##*/}"
+            V="${TAG_REF#sato-v}"
+          fi
+          echo "OPENCODE_VERSION=$V" >> "$GITHUB_ENV"
+          # Also export anchor for the manifest.
+          ANCHOR="$(grep -E '^anchor=' SATO_UPSTREAM.txt | cut -d= -f2 | tr -d '[:space:]')"
+          echo "UPSTREAM_ANCHOR=$ANCHOR" >> "$GITHUB_ENV"
+          echo "opencode_version=$V" >> "$GITHUB_OUTPUT"
+          echo "upstream_anchor=$ANCHOR" >> "$GITHUB_OUTPUT"
+
+      - name: Branded build via scripts/build-sato.sh
+        env:
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'prod' }}
+          SATO_BRAND: "Sato Code"
+        run: |
+          set -euo pipefail
+          # SKIP_VERIFY=0 (default): verify-thin-fork runs at build time — an extra
+          # safety net beyond sato-ci.yml's PR gate.
+          bash scripts/build-sato.sh
+
+      - name: Verify built binary
+        id: bin
+        run: |
+          set -euo pipefail
+          BIN="${{ matrix.bin_glob }}"
+          if [ ! -f "$BIN" ]; then
+            echo "expected binary $BIN was not produced" >&2
+            find packages/opencode/dist -maxdepth 3 -type f | head -20 >&2
+            exit 1
+          fi
+          SIZE="$(stat -c '%s' "$BIN" 2>/dev/null || stat -f '%z' "$BIN")"
+          if command -v sha256sum >/dev/null; then
+            SHA="$(sha256sum "$BIN" | awk '{print $1}')"
+          else
+            SHA="$(shasum -a 256 "$BIN" | awk '{print $1}')"
+          fi
+          echo "bin=$BIN"       >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE"     >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA"    >> "$GITHUB_OUTPUT"
+
+      - name: Package archive
+        id: pkg
+        run: |
+          set -euo pipefail
+          NAME="sato-code-${OPENCODE_VERSION}-${{ matrix.name }}"
+          mkdir -p out
+          if [ "${{ matrix.archive_ext }}" = "zip" ]; then
+            ARCHIVE="out/${NAME}.zip"
+            (cd "$(dirname "${{ steps.bin.outputs.bin }}")" && \
+              7z a -tzip -mx=9 "$GITHUB_WORKSPACE/$ARCHIVE" "$(basename "${{ steps.bin.outputs.bin }}")" \
+              || zip -9 "$GITHUB_WORKSPACE/$ARCHIVE" "$(basename "${{ steps.bin.outputs.bin }}")")
+          else
+            ARCHIVE="out/${NAME}.tar.gz"
+            tar -czf "$ARCHIVE" -C "$(dirname "${{ steps.bin.outputs.bin }}")" \
+              "$(basename "${{ steps.bin.outputs.bin }}")"
+          fi
+          if command -v sha256sum >/dev/null; then
+            ARCHIVE_SHA="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+          else
+            ARCHIVE_SHA="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
+          fi
+          ARCHIVE_SIZE="$(stat -c '%s' "$ARCHIVE" 2>/dev/null || stat -f '%z' "$ARCHIVE")"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "archive_name=$(basename "$ARCHIVE")" >> "$GITHUB_OUTPUT"
+          echo "archive_sha=$ARCHIVE_SHA" >> "$GITHUB_OUTPUT"
+          echo "archive_size=$ARCHIVE_SIZE" >> "$GITHUB_OUTPUT"
+
+      - name: Write per-platform manifest fragment
+        run: |
+          mkdir -p out
+          cat > "out/manifest-${{ matrix.name }}.json" <<JSON
+          {
+            "platform":        "${{ matrix.name }}",
+            "archive":         "${{ steps.pkg.outputs.archive_name }}",
+            "archive_sha256":  "${{ steps.pkg.outputs.archive_sha }}",
+            "archive_size":    ${{ steps.pkg.outputs.archive_size }},
+            "binary_sha256":   "${{ steps.bin.outputs.sha256 }}",
+            "binary_size":     ${{ steps.bin.outputs.size }},
+            "upstream_anchor": "${UPSTREAM_ANCHOR}",
+            "opencode_version":"${OPENCODE_VERSION}"
+          }
+          JSON
+          cat "out/manifest-${{ matrix.name }}.json"
+
+      - name: Boot smoke (linux only — windows-latest boot needs an MSYS shell dance)
+        if: matrix.name == 'linux-x64'
+        env:
+          OPENCODE_SERVER_PASSWORD: build-smoke
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.bin.outputs.bin }}"
+          chmod +x "$BIN"
+          "$BIN" --version | tee /tmp/ver.txt
+          grep -qi "sato" /tmp/ver.txt || \
+            (echo "release binary version output does not mention sato" >&2; exit 1)
+          "$BIN" serve --port 4098 --hostname 127.0.0.1 > serve.log 2>&1 &
+          SP=$!
+          trap 'kill "$SP" 2>/dev/null || true' EXIT
+          for i in $(seq 1 20); do
+            if curl -sS -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
+                 http://127.0.0.1:4098/global/health >/dev/null 2>&1; then
+              echo "release boot smoke OK"; exit 0
+            fi
+            sleep 1
+          done
+          echo "release boot smoke: health never returned" >&2
+          cat serve.log
+          exit 1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sato-code-${{ matrix.name }}
+          path: |
+            out/${{ steps.pkg.outputs.archive_name }}
+            out/manifest-${{ matrix.name }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+
+      - name: Assemble manifest.json + sato-code.pin.json
+        id: manifest
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # Determine version + tag.
+          if [ -n "${MANUAL_VERSION:-}" ]; then
+            V="$MANUAL_VERSION"
+            TAG="sato-v${V}"
+          else
+            TAG="${GITHUB_REF##*/}"
+            V="${TAG#sato-v}"
+          fi
+          ANCHOR="$(grep -E '^anchor=' SATO_UPSTREAM.txt | cut -d= -f2 | tr -d '[:space:]')"
+
+          # Locate the two per-platform manifest fragments.
+          L="$(find dist -type f -name 'manifest-linux-x64.json' | head -1)"
+          W="$(find dist -type f -name 'manifest-windows-x64.json' | head -1)"
+          if [ -z "$L" ] || [ -z "$W" ]; then
+            echo "missing per-platform manifest fragments" >&2
+            find dist -type f | head -40 >&2
+            exit 1
+          fi
+          LA="$(find dist -type f -name 'sato-code-*-linux-x64.tar.gz' | head -1)"
+          WA="$(find dist -type f -name 'sato-code-*-windows-x64.zip'  | head -1)"
+
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+
+          # Combined manifest.json — the ground truth artifact.
+          jq -n \
+             --arg tag "$TAG" \
+             --arg version "$V" \
+             --arg anchor "$ANCHOR" \
+             --arg base "$BASE_URL" \
+             --slurpfile linux "$L" \
+             --slurpfile win   "$W" \
+             '{ tag: $tag,
+                sato_version: $version,
+                upstream_anchor: $anchor,
+                artifacts: {
+                  "linux-x64":   ($linux[0]  + { url: ($base + "/" + $linux[0].archive)  }),
+                  "windows-x64": ($win[0]    + { url: ($base + "/" + $win[0].archive)    })
+                } }' > dist/manifest.json
+          cat dist/manifest.json
+
+          # sato-code.pin.json — the shape Sato Desktop's build.rs consumes.
+          jq -n \
+             --arg tag "$TAG" \
+             --arg base "$BASE_URL" \
+             --slurpfile linux "$L" \
+             --slurpfile win   "$W" \
+             '{ tag: $tag,
+                linux_x64:   { url: ($base + "/" + $linux[0].archive),
+                               sha256: $linux[0].archive_sha256,
+                               size:   $linux[0].archive_size },
+                windows_x64: { url: ($base + "/" + $win[0].archive),
+                               sha256: $win[0].archive_sha256,
+                               size:   $win[0].archive_size },
+                web_ui:      null }' > dist/sato-code.pin.json
+          cat dist/sato-code.pin.json
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "linux_archive=$LA" >> "$GITHUB_OUTPUT"
+          echo "windows_archive=$WA" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' || inputs.publish_release == true
+        env:
+          GH_TOKEN: ${{ secrets.SATO_BOT_PAT || secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.manifest.outputs.tag }}
+          LINUX: ${{ steps.manifest.outputs.linux_archive }}
+          WINDOWS: ${{ steps.manifest.outputs.windows_archive }}
+        run: |
+          set -euo pipefail
+          # Idempotent — if the release already exists (rerun), reuse it and clobber assets.
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Sato-Code $TAG" \
+              --notes "Automated Sato-Code release build.
+
+              - Upstream anchor: \`$(grep -E '^anchor=' SATO_UPSTREAM.txt | cut -d= -f2)\`
+              - Sato patches: $(ls sato-patches/*.patch | wc -l) applied at build time.
+              - Artifacts + \`manifest.json\` + \`sato-code.pin.json\` attached." \
+              --draft=false
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
+            "$LINUX" "$WINDOWS" dist/manifest.json dist/sato-code.pin.json --clobber

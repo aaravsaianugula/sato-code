@@ -35,9 +35,11 @@ is_allowed() {
     scripts/verify-thin-fork.sh)       return 0 ;;
     scripts/apply-patches.sh)          return 0 ;;
     scripts/build-sato.sh)             return 0 ;;
+    scripts/pick-upstream-tag.sh)      return 0 ;;
     opencode.json)                     return 0 ;;
     tui.json)                          return 0 ;;
     SATO_UPSTREAM.txt|SATO_README.md)  return 0 ;;
+    sato-code.pin.json)                return 0 ;;
     *) return 1 ;;
   esac
 }
