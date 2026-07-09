@@ -1,4 +1,4 @@
-From 8260b4629755d3d661beae63af24ae6977d52dd2 Mon Sep 17 00:00:00 2001
+From a3e48ac17ccb57c54e804f34537595075b0d63fa Mon Sep 17 00:00:00 2001
 From: AaravSai Anugula <aaravsai.anugula@gmail.com>
 Date: Wed, 8 Jul 2026 18:43:05 -0700
 Subject: [PATCH] sato: brand user-visible CLI strings + redirect web-UI embed
@@ -49,7 +49,7 @@ Kill-criterion: delete this patch if upstream OpenCode exposes both a "brand
  2 files changed, 16 insertions(+), 3 deletions(-)
 
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
-index 236838dbd..87d025b5a 100755
+index 236838dbd..2ee7bbf9d 100755
 --- a/packages/opencode/script/build.ts
 +++ b/packages/opencode/script/build.ts
 @@ -26,7 +26,11 @@ const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
@@ -72,7 +72,7 @@ index 236838dbd..87d025b5a 100755
 +      // Sato-Code brand: baked into the binary so scriptName + banner guard
 +      // resolve to "Sato Code" without a runtime env var. Falls back to
 +      // "opencode" so upstream builds are unchanged.
-+      "process.env.SATO_BRAND": `'${process.env.SATO_BRAND ?? "opencode"}'`,
++      "process.env.SATO_BRAND": JSON.stringify(process.env.SATO_BRAND ?? "opencode"),
        ...(item.os === "linux" ? { "process.env.OPENTUI_LIBC": JSON.stringify(item.abi ?? "glibc") } : {}),
      },
    })

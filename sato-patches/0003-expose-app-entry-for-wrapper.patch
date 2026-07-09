@@ -1,0 +1,49 @@
+From ddda4cf634503dd9ce8948bd7121b475dd12a810 Mon Sep 17 00:00:00 2001
+From: AaravSai Anugula <aaravsai.anugula@gmail.com>
+Date: Wed, 8 Jul 2026 18:59:02 -0700
+Subject: [PATCH] sato: expose @opencode-ai/app/entry so wrapper can reuse
+ upstream entry
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Files touched (upstream):
+  - packages/app/package.json (+1)   add "./entry" export to package.json exports
+
+Why:
+  packages/sato-app is a THIN wrapper around @opencode-ai/app that applies the
+  Sato skin (CSS override + title + favicon + data-theme default) around the
+  same UI. Without an export for the entry, the wrapper had to hand-copy
+  upstream packages/app/src/entry.tsx and re-implement Platform / notify /
+  ServerConnection / auth-token URL flow — every upstream change to that
+  entry then has to be mirrored by hand.
+
+  Adding a single "./entry" export lets the wrapper import upstream's entry
+  as-is and inject only the Sato skin, eliminating the drift risk and the
+  three regressions the hand-copy introduced (dropped auth_token URL flow,
+  dropped notification onclick, hardcoded "sato" version string).
+
+Owner: sato-code fork maintainers (@aaravsaianugula)
+Kill-criterion: delete when upstream OpenCode ships this export itself
+  (a one-line PR upstream would collapse this patch to zero).
+---
+ packages/app/package.json | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/packages/app/package.json b/packages/app/package.json
+index 7430a614b..e3f93078b 100644
+--- a/packages/app/package.json
++++ b/packages/app/package.json
+@@ -9,7 +9,8 @@
+     "./updater": "./src/updater.ts",
+     "./wsl/types": "./src/wsl/types.ts",
+     "./vite": "./vite.js",
+-    "./index.css": "./src/index.css"
++    "./index.css": "./src/index.css",
++    "./entry": "./src/entry.tsx"
+   },
+   "scripts": {
+     "typecheck": "tsgo -b",
+-- 
+2.54.0.windows.1
+

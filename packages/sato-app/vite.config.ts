@@ -58,14 +58,25 @@ export default defineConfig({
       name: "sato:theme-preload",
       enforce: "pre",
       transformIndexHtml(html) {
-        const src = readFileSync(themePreload, "utf8").replace(
-          `localStorage.getItem(key) || "oc-2"`,
-          `localStorage.getItem(key) || "sato-dark"`,
-        )
-        return html.replace(
-          `<script id="oc-theme-preload-script" src="/oc-theme-preload.js"></script>`,
-          `<script id="oc-theme-preload-script">${src}</script>`,
-        )
+        // Fail LOUDLY if either target string moves upstream — a silent
+        // .replace() miss would ship an un-skinned first paint (still
+        // "oc-2" default) or leave upstream's preload tag in place.
+        // Better to break the build so the sync PR flags it.
+        const preloadRaw = readFileSync(themePreload, "utf8")
+        const defaultTarget = `localStorage.getItem(key) || "oc-2"`
+        if (!preloadRaw.includes(defaultTarget)) {
+          throw new Error(
+            `sato:theme-preload: target '${defaultTarget}' not found in ${themePreload}; upstream oc-theme-preload.js changed — update this transform.`,
+          )
+        }
+        const src = preloadRaw.replace(defaultTarget, `localStorage.getItem(key) || "sato-dark"`)
+        const scriptTagTarget = `<script id="oc-theme-preload-script" src="/oc-theme-preload.js"></script>`
+        if (!html.includes(scriptTagTarget)) {
+          throw new Error(
+            `sato:theme-preload: target '${scriptTagTarget}' not found in index.html; the wrapper's index.html or upstream tag changed — update this transform.`,
+          )
+        }
+        return html.replace(scriptTagTarget, `<script id="oc-theme-preload-script">${src}</script>`)
       },
     },
     ...(appPlugin as Plugin[]),
