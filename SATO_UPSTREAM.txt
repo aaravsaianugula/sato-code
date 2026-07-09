@@ -1,0 +1,4 @@
+anchor=v1.17.15
+synced_at=2026-07-08
+upstream=https://github.com/anomalyco/opencode.git
+notes=sato-main is a thin fork. All Sato changes are additive (packages/sato-*, packages/sato-app) plus git-am source patches under sato-patches/ (NOT patches/ — that dir is Bun's dependency-patch system). The daily sync workflow advances this anchor to the newest upstream release TAG (not the dev branch), re-applies sato-patches/, runs CI, and auto-merges only if green.
