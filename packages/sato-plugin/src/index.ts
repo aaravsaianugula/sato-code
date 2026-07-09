@@ -15,7 +15,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { makeSatoPaths } from "./paths.js"
 import { makeAudit } from "./audit.js"
-import { loadPolicy, decide, type Policy } from "./policy.js"
+import { loadPolicy, decide, enforcementError, type Policy } from "./policy.js"
 import { buildSatoHeaders, mergeHeaders } from "./headers.js"
 import { applyPersona } from "./persona.js"
 import { applyProviderDefaults } from "./config.js"
@@ -77,8 +77,17 @@ export const SatoPlugin: Plugin = async (input) => {
     // -------------------------------------------------------------
     // 4. Policy enforcement — pre-tool.
     //    - deny → throw (blocks the tool)
-    //    - ask  → let opencode's built-in permission machinery decide
-    //             (we DO NOT auto-approve; ask is the safe default).
+    //    - ask  → for a sensitive-classified tool, THROW an enforceable
+    //             confirmation gate. Upstream's `permission.ask` hook is
+    //             not wired into core (as of v1.17.15), so relying on it
+    //             would leave `ask` a silent no-op — a user config like
+    //             `bash: allow` would auto-allow and drop workspace
+    //             friction. Throwing here converts silent-loss into a
+    //             visible, consciously-waivable gate (set the tool to
+    //             `allow` or `defaults.sensitive: allow` to bypass).
+    //             For read-only tools set to `ask` (user explicitly
+    //             restricting reads), we leave enforcement to upstream —
+    //             throwing there would be a UX regression, not safety.
     //    - allow→ proceed silently
     //    Every attempt is audit-logged.
     // -------------------------------------------------------------
@@ -92,12 +101,8 @@ export const SatoPlugin: Plugin = async (input) => {
         decision,
         data: { via, callID: i.callID, args: o.args, policy_fallback: policy.fallback },
       })
-      if (decision === "deny") {
-        throw new Error(
-          `Sato policy: tool '${i.tool}' is DENIED by .sato/policy.yaml (${via}). ` +
-            `To allow, edit .sato/policy.yaml or remove the deny rule.`,
-        )
-      }
+      const enforce = enforcementError(policy, i.tool)
+      if (enforce) throw new Error(enforce.throwMessage)
     },
 
     // -------------------------------------------------------------

@@ -49,6 +49,42 @@ describe("redact", () => {
     assert.match(r.payload, /truncated/)
   })
 
+  // Adversarial regression: hyphenated header names bypass BOTH passes.
+  //
+  // Old key-name pass: `SENSITIVE_KEY_SUBSTR.some((needle) =>
+  // "x-api-key".toLowerCase().includes(needle))` — none of the substrings
+  // (`apikey`, `api_key`, `authorization`, …) is a substring of
+  // `x-api-key` (the dashes break `apikey`), so the key looked benign
+  // and the raw value was written verbatim into the audit log.
+  //
+  // Value-pattern pass: an opaque token like `abcd1234efgh5678` matches
+  // none of the shape regexes (Bearer, sk-, ghp_, JWT, AKIA), so it
+  // slipped through too.
+  //
+  // Result: the secret landed in `.sato/state/permissions.jsonl`. The
+  // new key-name pass normalizes the key (`x-api-key` → `xapikey`)
+  // BEFORE substring matching, so the `apikey` needle catches it.
+  it("redacts hyphenated header names — x-api-key, api-key, x-openai-key", () => {
+    const opaqueValue = "abcd1234efgh5678ijkl9012mnop3456"
+    const r = redact({
+      headers: {
+        "x-api-key": opaqueValue,
+        "api-key": opaqueValue,
+        "X-Api-Key": opaqueValue,
+        "x-openai-key": opaqueValue,
+        "api.key": opaqueValue,
+      },
+    }) as { headers: Record<string, string> }
+    assert.match(r.headers["x-api-key"], /\[redacted:/, "x-api-key must be redacted")
+    assert.match(r.headers["api-key"], /\[redacted:/, "api-key must be redacted")
+    assert.match(r.headers["X-Api-Key"], /\[redacted:/, "X-Api-Key must be redacted")
+    assert.match(r.headers["x-openai-key"], /\[redacted:/, "x-openai-key must be redacted")
+    assert.match(r.headers["api.key"], /\[redacted:/, "api.key must be redacted")
+    // Sanity: the raw opaque value must NOT appear anywhere in the payload.
+    const serialized = JSON.stringify(r)
+    assert.equal(serialized.includes(opaqueValue), false, "raw secret must not survive redaction")
+  })
+
   it("caps recursion depth", () => {
     const cycleFree: any = {}
     let cur = cycleFree

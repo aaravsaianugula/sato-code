@@ -9,7 +9,7 @@
 
 import * as path from "node:path"
 import * as fs from "node:fs/promises"
-import { ensureDir } from "./paths.js"
+import { ensureDir, resolveInsideRoot } from "./paths.js"
 import { redact } from "./redact.js"
 
 export type AuditEntry = {
@@ -53,7 +53,10 @@ export function makeAudit(stateDir: string): Audit {
     async sessionBoundary(sessionID, kind, info) {
       try {
         await ensureDir(sessionsDir)
-        const p = path.join(sessionsDir, `${sessionID}.json`)
+        // Defense-in-depth: sessionID comes from an untrusted event
+        // payload; jail the resulting file under `sessionsDir` so a
+        // crafted id like `../foo` or an absolute path cannot escape.
+        const p = resolveInsideRoot(sessionsDir, `${sessionID}.json`)
         // Read-modify-write: idempotent. Each write records the most recent
         // known state; created is set once, updated stamps last-seen.
         let prev: Record<string, unknown> = {}

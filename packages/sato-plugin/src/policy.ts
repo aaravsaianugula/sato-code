@@ -95,6 +95,19 @@ function isDecision(x: unknown): x is Decision {
 }
 
 /**
+ * Keys we never accept from a policy file — assigning `__proto__` on a
+ * regular object mutates the prototype chain (JS spec behavior), and
+ * `constructor`/`prototype` are the standard proto-pollution escalation
+ * paths. Rejecting them at parse time gives us a clear, sourced error
+ * instead of a silent prototype-poisoned object. This is defense-in-depth
+ * on top of the null-prototype objects the parser builds — an
+ * `Object.create(null)` object treats `__proto__` as a normal data
+ * property, but downstream code that mistakenly reads via a regular
+ * object would still be exposed, so we refuse the key outright.
+ */
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"])
+
+/**
  * Minimal YAML subset parser for the policy schema.
  *
  * Handles:
@@ -106,9 +119,14 @@ function isDecision(x: unknown): x is Decision {
  * Rejects everything else (lists, block scalars, anchors). This is
  * intentional — a malformed policy is more dangerous than an absent one,
  * and we don't want silent partial parses.
+ *
+ * Proto-safety: all objects are built with `Object.create(null)` so
+ * `__proto__`/`constructor` reads never traverse the prototype chain,
+ * and the forbidden-key list above rejects the standard pollution
+ * payloads at parse time.
  */
 export function parsePolicyText(text: string): { ok: true; data: Record<string, unknown> } | { ok: false; error: string } {
-  const root: Record<string, unknown> = {}
+  const root: Record<string, unknown> = Object.create(null) as Record<string, unknown>
   const stack: { indent: number; obj: Record<string, unknown> }[] = [{ indent: -1, obj: root }]
   const lines = text.split(/\r?\n/)
   for (let i = 0; i < lines.length; i += 1) {
@@ -126,8 +144,11 @@ export function parsePolicyText(text: string): { ok: true; data: Record<string, 
     const key = line.slice(0, colon).trim()
     const rest = line.slice(colon + 1).trim()
     if (!key) return { ok: false, error: `line ${i + 1}: empty key` }
+    if (FORBIDDEN_KEYS.has(key)) {
+      return { ok: false, error: `line ${i + 1}: forbidden key '${key}' (prototype-pollution guard)` }
+    }
     if (rest.length === 0) {
-      const child: Record<string, unknown> = {}
+      const child: Record<string, unknown> = Object.create(null) as Record<string, unknown>
       parent.obj[key] = child
       stack.push({ indent, obj: child })
     } else {
@@ -165,17 +186,52 @@ export async function loadPolicy(policyPath: string): Promise<Policy> {
   return normalizePolicy(parsed.data)
 }
 
+/**
+ * Read a field ONLY if it is an OWN property. This is the second half of
+ * proto-pollution defense: even if a caller hands us a polluted regular
+ * object (e.g. through `normalizePolicy` directly), inherited fields are
+ * ignored, so a polluted `Object.prototype.sensitive = "allow"` cannot
+ * escalate a sensitive tool.
+ */
+function ownGet(obj: unknown, key: string): unknown {
+  if (obj === null || typeof obj !== "object") return undefined
+  return Object.hasOwn(obj as object, key) ? (obj as Record<string, unknown>)[key] : undefined
+}
+
 export function normalizePolicy(raw: Record<string, unknown>): Policy {
   const errors: string[] = []
-  const version = typeof raw.version === "number" ? (raw.version as number) : 1
-  const defaultsRaw = (raw.defaults as Record<string, unknown> | undefined) ?? {}
-  const sensitive = isDecision(defaultsRaw.sensitive) ? (defaultsRaw.sensitive as Decision) : "ask"
-  const read_only = isDecision(defaultsRaw.read_only) ? (defaultsRaw.read_only as Decision) : "allow"
+  const rawVersion = ownGet(raw, "version")
+  const version = typeof rawVersion === "number" ? rawVersion : 1
+  const defaultsRawUnknown = ownGet(raw, "defaults")
+  const defaultsRaw =
+    defaultsRawUnknown && typeof defaultsRawUnknown === "object"
+      ? (defaultsRawUnknown as Record<string, unknown>)
+      : undefined
+  const rawSensitive = ownGet(defaultsRaw, "sensitive")
+  const rawReadOnly = ownGet(defaultsRaw, "read_only")
+  const sensitive = isDecision(rawSensitive) ? rawSensitive : "ask"
+  const read_only = isDecision(rawReadOnly) ? rawReadOnly : "allow"
+  // Regular object is safe here: we filter FORBIDDEN_KEYS below and only
+  // write validated `Decision` values, so the prototype chain is never
+  // touched. Keeps deepStrictEqual test assertions well-behaved.
   const toolsOut: Record<string, Decision> = {}
-  const toolsRaw = (raw.tools as Record<string, unknown> | undefined) ?? {}
-  for (const [k, v] of Object.entries(toolsRaw)) {
-    if (isDecision(v)) toolsOut[k] = v
-    else errors.push(`tools.${k}: not a valid decision (${String(v)})`)
+  const toolsRawUnknown = ownGet(raw, "tools")
+  const toolsRaw =
+    toolsRawUnknown && typeof toolsRawUnknown === "object"
+      ? (toolsRawUnknown as Record<string, unknown>)
+      : undefined
+  if (toolsRaw) {
+    // Object.keys is own-only; combined with FORBIDDEN_KEYS filtering to
+    // stay defense-in-depth even if a caller hand-crafts a raw object.
+    for (const k of Object.keys(toolsRaw)) {
+      if (FORBIDDEN_KEYS.has(k)) {
+        errors.push(`tools.${k}: forbidden key`)
+        continue
+      }
+      const v = (toolsRaw as Record<string, unknown>)[k]
+      if (isDecision(v)) toolsOut[k] = v
+      else errors.push(`tools.${k}: not a valid decision (${String(v)})`)
+    }
   }
   return {
     version,
@@ -199,9 +255,52 @@ export function normalizePolicy(raw: Record<string, unknown>): Policy {
  *      `ask` — the plugin never silently auto-approves a sensitive
  *      tool the built-in permission would have prompted for.
  */
+/**
+ * Enforcement layer: given a policy decision, return the error message
+ * the plugin's `tool.execute.before` hook should throw, or `null` when
+ * the tool should proceed.
+ *
+ * Two throw cases:
+ *   1. `deny` on ANY tool — hard stop, workspace forbids this.
+ *   2. `ask` on a SENSITIVE tool — enforceable speed-bump. Upstream's
+ *      `permission.ask` hook is not currently wired into core, so `ask`
+ *      would silently fall through to user config (which may auto-allow
+ *      via `bash: allow` etc), defeating the workspace's friction. We
+ *      throw a user-actionable error instead: the user can raise the
+ *      policy to `allow` (or `defaults.sensitive: allow`) to consciously
+ *      bypass — never silently.
+ *
+ * We do NOT throw on `ask` for read-only tools; that path is a user
+ * explicitly restricting reads, and enforcement is upstream's UX.
+ * Isolated from `decide()` so we can unit-test it directly.
+ */
+export function enforcementError(
+  policy: Policy,
+  tool: string,
+): { throwMessage: string } | null {
+  const { decision, via } = decide(policy, tool)
+  if (decision === "deny") {
+    return {
+      throwMessage:
+        `Sato policy: tool '${tool}' is DENIED by .sato/policy.yaml (${via}). ` +
+        `To allow, edit .sato/policy.yaml or remove the deny rule.`,
+    }
+  }
+  if (decision === "ask" && classify(tool) === "sensitive") {
+    return {
+      throwMessage:
+        `Sato policy requires confirmation for '${tool}' — ` +
+        `set it to allow (or defaults.sensitive: allow) in .sato/policy.yaml to bypass.`,
+    }
+  }
+  return null
+}
+
 export function decide(policy: Policy, tool: string): { decision: Decision; via: string } {
   const cls = classify(tool)
-  const explicit = policy.tools[tool]
+  // Own-property-only lookup: even if Object.prototype was polluted
+  // upstream, we cannot inherit `policy.tools[tool]` from the chain.
+  const explicit = Object.hasOwn(policy.tools, tool) ? policy.tools[tool] : undefined
   if (explicit) {
     // Explicit allow on a sensitive tool: honor only if user explicitly
     // set defaults.sensitive: allow too (i.e. they consciously opted in).

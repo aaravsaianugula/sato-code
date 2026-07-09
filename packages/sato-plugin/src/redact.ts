@@ -14,7 +14,14 @@
 // The two passes together handle both "field named apiKey" and "someone
 // stuffed a token into `command` or `body`" cases.
 
-/** Substrings that mark a field name as sensitive (case-insensitive). */
+/**
+ * Substrings that mark a field name as sensitive. Matched against a
+ * key that has already been lowercased AND had `-` `_` `.` stripped,
+ * so `X-Api-Key`, `api_key`, `api.key`, and `apikey` all collapse to
+ * the same form. (Entries with underscores below are kept for
+ * documentation/backward-compat but are equivalent to their
+ * separator-free forms post-normalization.)
+ */
 const SENSITIVE_KEY_SUBSTR = [
   "password",
   "passwd",
@@ -30,11 +37,24 @@ const SENSITIVE_KEY_SUBSTR = [
   "private_key",
   "privatekey",
   "credential",
+  // Provider-specific header names whose normalized form doesn't
+  // contain a generic marker above (e.g. `X-OpenAI-Key` → `xopenaikey`
+  // has no `apikey` substring). Opaque token values bypass the
+  // value-pattern pass, so we MUST catch them on key name.
+  "openaikey",
+  "anthropickey",
+  "googlekey",
 ]
 
 function keyLooksSensitive(k: string): boolean {
-  const lower = k.toLowerCase()
-  return SENSITIVE_KEY_SUBSTR.some((needle) => lower.includes(needle))
+  // Normalize: lowercase AND strip separators so `x-api-key`, `X_API_KEY`,
+  // `api.key`, and `x-openai-key` all collapse to a form that contains
+  // the `apikey`/`openaikey` substrings the list checks for. Without
+  // this, hyphenated HTTP header names slip past both this pass AND the
+  // value-pattern pass (opaque tokens have no distinguishing shape), and
+  // the raw secret lands in `.sato/state/permissions.jsonl`.
+  const normalized = k.toLowerCase().replace(/[-_.]/g, "")
+  return SENSITIVE_KEY_SUBSTR.some((needle) => normalized.includes(needle))
 }
 
 /** Patterns for likely-secret VALUES (used when the key doesn't tell us). */

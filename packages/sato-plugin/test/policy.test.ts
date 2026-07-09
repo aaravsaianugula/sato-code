@@ -50,8 +50,14 @@ describe("parsePolicyText", () => {
     assert.ok(p.ok)
     if (p.ok) {
       assert.equal(p.data.version, 1)
-      assert.deepEqual(p.data.defaults, { sensitive: "ask", read_only: "allow" })
-      assert.deepEqual(p.data.tools, { bash: "deny", read: "allow" })
+      // Parser builds null-prototype objects for proto-safety, so we
+      // compare own-property shape without asserting the prototype.
+      const defaults = p.data.defaults as Record<string, unknown>
+      assert.equal(defaults.sensitive, "ask")
+      assert.equal(defaults.read_only, "allow")
+      const tools = p.data.tools as Record<string, unknown>
+      assert.equal(tools.bash, "deny")
+      assert.equal(tools.read, "allow")
     }
   })
 
@@ -115,6 +121,125 @@ describe("decide", () => {
   it("explicit ask on a read-only tool is honored (policy can restrict)", () => {
     const policy = normalizePolicy({ tools: { read: "ask" } })
     assert.equal(decide(policy, "read").decision, "ask")
+  })
+})
+
+// -----------------------------------------------------------------------
+// Adversarial: prototype-pollution regression.
+//
+// Failing this suite means a `.sato/policy.yaml` can silently escalate a
+// sensitive tool to `allow` — the exact opposite of the plugin's
+// documented anti-escalation guarantee.
+//
+// Old parser: assigned keys directly onto regular {} objects. A YAML
+// payload like `defaults.__proto__.sensitive: allow` set the prototype of
+// the `defaults` object, so a later `defaultsRaw.sensitive` walked the
+// chain and returned "allow" — flipping `policy.defaults.sensitive` to
+// "allow" and letting `tools: { bash: allow }` be honored verbatim.
+//
+// New parser: builds objects with `Object.create(null)` AND rejects the
+// three well-known escalation keys at parse time.
+// -----------------------------------------------------------------------
+describe("proto-pollution regression", () => {
+  const cleanup = () => {
+    // Belt-and-suspenders: whatever these tests do, they must not leak
+    // pollution into the process's global Object.prototype.
+    delete (Object.prototype as unknown as Record<string, unknown>).sensitive
+    delete (Object.prototype as unknown as Record<string, unknown>).bash
+    delete (Object.prototype as unknown as Record<string, unknown>).polluted
+  }
+
+  it("__proto__.sensitive: allow does NOT escalate bash to allow", () => {
+    cleanup()
+    const yaml = [
+      "defaults:",
+      "  __proto__:",
+      "    sensitive: allow",
+      "tools:",
+      "  bash: allow",
+    ].join("\n")
+    const p = parsePolicyText(yaml)
+    // Accept either outcome from the parser: (a) reject the forbidden
+    // key outright, or (b) accept but treat __proto__ as an inert data
+    // property on a null-proto object. Both are safe; only the OLD
+    // parser flipped bash to `allow`.
+    let bashDecision: string
+    if (!p.ok) {
+      // Rejection path: fallback policy applies → bash → ask.
+      // Simulate the fallback path by normalizing an empty object.
+      const pol = normalizePolicy({})
+      bashDecision = decide(pol, "bash").decision
+    } else {
+      const pol = normalizePolicy(p.data)
+      bashDecision = decide(pol, "bash").decision
+    }
+    assert.equal(
+      bashDecision,
+      "ask",
+      "bash must still require ask — a proto-polluted defaults must not escalate it to allow",
+    )
+    // Object.prototype must NOT be polluted after parsing an untrusted
+    // policy file.
+    assert.equal((Object.prototype as unknown as Record<string, unknown>).sensitive, undefined)
+    cleanup()
+  })
+
+  it("top-level __proto__ key does NOT escalate bash to allow", () => {
+    cleanup()
+    const yaml = [
+      "__proto__:",
+      "  defaults:",
+      "    sensitive: allow",
+      "tools:",
+      "  bash: allow",
+    ].join("\n")
+    const p = parsePolicyText(yaml)
+    let bashDecision: string
+    if (!p.ok) {
+      const pol = normalizePolicy({})
+      bashDecision = decide(pol, "bash").decision
+    } else {
+      const pol = normalizePolicy(p.data)
+      bashDecision = decide(pol, "bash").decision
+    }
+    assert.equal(bashDecision, "ask")
+    assert.equal((Object.prototype as unknown as Record<string, unknown>).sensitive, undefined)
+    cleanup()
+  })
+
+  it("constructor / prototype keys are rejected or inert", () => {
+    cleanup()
+    for (const key of ["constructor", "prototype"]) {
+      const yaml = ["defaults:", `  ${key}:`, "    sensitive: allow", "tools:", "  bash: allow"].join("\n")
+      const p = parsePolicyText(yaml)
+      let bashDecision: string
+      if (!p.ok) {
+        const pol = normalizePolicy({})
+        bashDecision = decide(pol, "bash").decision
+      } else {
+        const pol = normalizePolicy(p.data)
+        bashDecision = decide(pol, "bash").decision
+      }
+      assert.equal(bashDecision, "ask", `key '${key}' must not escalate bash`)
+      assert.equal((Object.prototype as unknown as Record<string, unknown>).sensitive, undefined)
+    }
+    cleanup()
+  })
+
+  it("normalizePolicy ignores a polluted Object.prototype (own-props only)", () => {
+    cleanup()
+    // Simulate an already-polluted process (e.g. from a third-party
+    // dependency). `normalizePolicy({})` MUST still emit `sensitive: ask`
+    // because inherited props are not read.
+    ;(Object.prototype as unknown as Record<string, unknown>).sensitive = "allow"
+    try {
+      const pol = normalizePolicy({})
+      assert.equal(pol.defaults.sensitive, "ask", "sensitive must not be inherited from Object.prototype")
+      const d = decide(pol, "bash")
+      assert.equal(d.decision, "ask")
+    } finally {
+      cleanup()
+    }
   })
 })
 
