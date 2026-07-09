@@ -7,12 +7,21 @@
 // lands in later tasks (see SATO_README.md).
 import type { Plugin } from "@opencode-ai/plugin"
 
+type SatoRoute = {
+  primary?: string
+  mode?: string
+  confidence?: number
+  degraded_from?: string
+}
+
 export const SatoPlugin: Plugin = async () => {
   return {
     event: async ({ event }) => {
       if (event.type !== "message.part.updated") return
-      const part = (event as any).properties?.part
-      const route = part?.metadata?.sato?.route
+      const part = event.properties.part
+      if (part.type !== "text") return
+      const sato = part.metadata?.sato as { route?: SatoRoute } | undefined
+      const route = sato?.route
       if (!route) return
       // eslint-disable-next-line no-console
       console.log(

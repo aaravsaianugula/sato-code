@@ -1,4 +1,4 @@
-From 66042d16cb924d1c168a518f42af7e632588dcc7 Mon Sep 17 00:00:00 2001
+From 0390e290bc0d0212ecff33c2ef6ec4bd53e5b55b Mon Sep 17 00:00:00 2001
 From: AaravSai Anugula <aaravsai.anugula@gmail.com>
 Date: Wed, 8 Jul 2026 17:34:58 -0700
 Subject: [PATCH] sato: capture x-sato-* response headers into
@@ -40,7 +40,7 @@ Kill-criterion: delete this patch when upstream OpenCode accepts a generic
  create mode 100644 packages/opencode/src/provider/sato-headers.ts
 
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
-index c979fc446..62827851c 100644
+index c979fc446..5d651bf9a 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
 @@ -31,6 +31,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
@@ -59,21 +59,21 @@ index c979fc446..62827851c 100644
 +          const satoCap: Record<string, string> = {}
 +          res.headers.forEach((v, k) => { if (k.toLowerCase().startsWith("x-sato-")) satoCap[k.toLowerCase()] = v })
 +          const satoH = opts.headers as any
-+          const satoSid = satoH?.get?.("x-session-affinity") ?? satoH?.["x-session-affinity"] ?? satoH?.["X-Session-Id"] ?? satoH?.["x-session-id"]
++          const satoSid = satoH?.get?.("x-session-affinity") ?? satoH?.get?.("x-session-id") ?? satoH?.["x-session-affinity"] ?? satoH?.["X-Session-Id"] ?? satoH?.["x-session-id"]
 +          if (satoSid && Object.keys(satoCap).length) SatoResponseHeaders.set(satoSid, satoCap)
            if (!chunkAbortCtl) return res
            return wrapSSE(res, chunkTimeout, chunkAbortCtl)
          }
 diff --git a/packages/opencode/src/provider/sato-headers.ts b/packages/opencode/src/provider/sato-headers.ts
 new file mode 100644
-index 000000000..2b475d976
+index 000000000..d6a1d7762
 --- /dev/null
 +++ b/packages/opencode/src/provider/sato-headers.ts
 @@ -0,0 +1,6 @@
 +// Sato fork: per-session x-sato-* response header capture (see sato-patches/0002)
 +const s = new Map<string, Record<string, string>>()
 +export const SatoResponseHeaders = {
-+  set(id: string, h: Record<string, string>) { s.set(id, { ...(s.get(id) ?? {}), ...h }) },
++  set(id: string, h: Record<string, string>) { s.set(id, h) },
 +  take(id: string): Record<string, string> | undefined { const v = s.get(id); s.delete(id); return v },
 +}
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
