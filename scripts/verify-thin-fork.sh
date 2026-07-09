@@ -27,19 +27,29 @@ fi
 
 # Allowlist of additive Sato paths. A changed path is OK iff it matches one of
 # these prefixes/globs. Everything else is upstream tree and must be untouched.
+#
+# NOTE: the .github/workflows/ entries are EXPLICIT FILENAMES, not a
+# `sato-*.yml` glob. This is the last defense against upstream sneaking a
+# workflow file in (a broad glob would happily allow an arbitrary
+# `sato-anything.yml` to land through a sync). If you add a new sato-* workflow,
+# add its exact filename here — that same edit forces a code review of the
+# workflow file itself.
 is_allowed() {
   case "$1" in
-    packages/sato-*/*|packages/sato-*) return 0 ;;
-    sato-patches/*)                    return 0 ;;
-    .github/workflows/sato-*.yml)      return 0 ;;
-    scripts/verify-thin-fork.sh)       return 0 ;;
-    scripts/apply-patches.sh)          return 0 ;;
-    scripts/build-sato.sh)             return 0 ;;
-    scripts/pick-upstream-tag.sh)      return 0 ;;
-    opencode.json)                     return 0 ;;
-    tui.json)                          return 0 ;;
-    SATO_UPSTREAM.txt|SATO_README.md)  return 0 ;;
-    sato-code.pin.json)                return 0 ;;
+    packages/sato-*/*|packages/sato-*)  return 0 ;;
+    sato-patches/*)                     return 0 ;;
+    .github/workflows/sato-ci.yml)      return 0 ;;
+    .github/workflows/sato-sync.yml)    return 0 ;;
+    .github/workflows/sato-build.yml)   return 0 ;;
+    .github/workflows/sato-canary.yml)  return 0 ;;
+    scripts/verify-thin-fork.sh)        return 0 ;;
+    scripts/apply-patches.sh)           return 0 ;;
+    scripts/build-sato.sh)              return 0 ;;
+    scripts/pick-upstream-tag.sh)       return 0 ;;
+    opencode.json)                      return 0 ;;
+    tui.json)                           return 0 ;;
+    SATO_UPSTREAM.txt|SATO_README.md)   return 0 ;;
+    sato-code.pin.json)                 return 0 ;;
     *) return 1 ;;
   esac
 }

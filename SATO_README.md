@@ -61,8 +61,10 @@ deliberately *thin*:
 
 ## Workflows
 
-Four GitHub Actions workflows live under `.github/workflows/sato-*.yml` (all opt-in by upstream's
-allowlist in `verify-thin-fork.sh`, so they don't count as drift):
+Four GitHub Actions workflows live under `.github/workflows/sato-*.yml` (each one is allow-listed
+by **exact filename** in `verify-thin-fork.sh` — deliberately not a glob, so upstream cannot land a
+new `.github/workflows/sato-<anything>.yml` through a sync without a matching allowlist change,
+which forces a human review of the workflow file):
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
@@ -80,8 +82,25 @@ allowlist in `verify-thin-fork.sh`, so they don't count as drift):
   **Issues: Read & Write**, **Metadata: Read**.
 - Store as an Actions secret named `SATO_BOT_PAT`.
 - Enable *"Allow GitHub Actions to create and approve pull requests"* in repo settings.
-- Add branch protection on `sato-main`: require PR, require `sato-ci` to pass. Do NOT allow the
-  bot to bypass required checks — CI must gate every auto-merge.
+
+### Branch protection on `sato-main` — LOAD-BEARING, not defense-in-depth
+
+Once `sato-sync.yml` enables `gh pr merge --auto`, further pushes to the sync branch are
+re-gated **only** by the required-checks list configured on the **base branch** (`sato-main`).
+The workflow itself cannot re-run `sato-ci` on a human-pushed commit landing on the sync branch
+between "auto-merge enabled" and "merge fires" — the required-checks setting is what protects
+that edge case. If the setting is missing, `--auto` can silently land un-CI'd code.
+
+Enforce, on `sato-main`:
+
+1. **Require a pull request before merging.**
+2. **Require status checks to pass before merging.** Under *"Status checks that are required"*,
+   add **`sato-ci gates (linux-x64)`** — this is the job name from `sato-ci.yml`.
+3. **Do not allow the bot to bypass required checks** — the bot must pass CI like everyone else.
+4. **Restrict who can push directly** to sato-main to the bot and the release owner.
+
+This is REQUIRED for safety, not merely a nice-to-have. The auto-merge job in `sato-sync.yml`
+has an inline comment marking it load-bearing.
 
 ## Release pin — `sato-code.pin.json`
 

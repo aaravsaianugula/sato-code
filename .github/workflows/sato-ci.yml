@@ -101,10 +101,16 @@ jobs:
       - name: Gate 3 — typecheck sato packages
         # Restrict to sato-* packages so a CI green is unambiguous about our layer
         # (upstream typecheck failures are their problem, not ours).
+        # NOTE: No `|| true` anywhere in this gate — a real TS error MUST fail the
+        # workflow. `bun turbo typecheck --filter` succeeds trivially when no sato-*
+        # package has a `typecheck` script wired yet, so we ALSO run `tsc --noEmit`
+        # directly against sato-plugin's tsconfig as the load-bearing check.
+        # (sato-app is a Vite/Solid app whose tsc gate belongs in the Vite build,
+        # not here; sato-plugin is the one with real logic and strict:true.)
         run: |
-          bun turbo typecheck --filter='./packages/sato-*' || \
-            (echo "no sato-* typecheck script wired; falling back to root tsc noop" && \
-             bun --cwd packages/sato-plugin exec tsc --noEmit 2>/dev/null || true)
+          set -euo pipefail
+          bun turbo typecheck --filter='./packages/sato-*'
+          bun --cwd packages/sato-plugin exec tsc --noEmit
 
       - name: Gate 4 — build branded linux-x64 CLI (skin skipped)
         # --skip-embed-web-ui skips the sato-app skin build for CI turnaround.
@@ -136,17 +142,28 @@ jobs:
           SERVE_PID=$!
           trap 'kill "$SERVE_PID" 2>/dev/null || true' EXIT
           # Poll for readiness (up to 30s).
+          # curl -f fails on 4xx/5xx (so 401 during startup no longer looks "ready");
+          # only a real 2xx with a body advances the loop.
+          READY=0
           for i in $(seq 1 30); do
-            if curl -sS -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
+            if curl -fsS -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
                  http://127.0.0.1:4099/global/health >/tmp/health.json 2>/dev/null; then
+              READY=1
               break
             fi
             sleep 1
           done
-          # Assert the health endpoint returned success.
+          if [ "$READY" -ne 1 ]; then
+            echo "health endpoint never returned 2xx within 30s" >&2
+            echo "---serve.log---"; cat serve.log
+            exit 1
+          fi
           cat /tmp/health.json
-          grep -q -i '"healthy"\|"ok"\|"status"' /tmp/health.json || \
-            (echo "health endpoint did not return a recognizable healthy payload" >&2; \
+          # Positive assertion: /global/health success shape is { healthy: true, version: <str> }.
+          # A degraded/unhealthy payload (e.g. {"healthy":false,...} or {"status":"unhealthy"})
+          # MUST fail this gate — grepping only for the field name would let those through.
+          grep -qE '"healthy"[[:space:]]*:[[:space:]]*true' /tmp/health.json || \
+            (echo "health endpoint did not report healthy:true" >&2; \
              echo "---serve.log---"; cat serve.log; exit 1)
 
       - name: Gate 6 — brand smoke (--version + --help mention Sato)

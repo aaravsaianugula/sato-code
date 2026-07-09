@@ -142,11 +142,21 @@ jobs:
             find packages/opencode/dist -maxdepth 3 -type f | head -20 >&2
             exit 1
           fi
-          SIZE="$(stat -c '%s' "$BIN" 2>/dev/null || stat -f '%z' "$BIN")"
+          SIZE="$(stat -c '%s' "$BIN" 2>/dev/null || stat -f '%z' "$BIN" 2>/dev/null || echo "")"
+          # Guard against an empty SIZE landing in the manifest JSON as a bare
+          # `,` (would produce invalid JSON). Fail loudly instead.
+          if ! [ "$SIZE" -gt 0 ] 2>/dev/null; then
+            echo "stat did not report a positive size for $BIN (got '$SIZE')" >&2
+            exit 1
+          fi
           if command -v sha256sum >/dev/null; then
             SHA="$(sha256sum "$BIN" | awk '{print $1}')"
           else
             SHA="$(shasum -a 256 "$BIN" | awk '{print $1}')"
+          fi
+          if [ -z "$SHA" ]; then
+            echo "sha256 computation produced empty output for $BIN" >&2
+            exit 1
           fi
           echo "bin=$BIN"       >> "$GITHUB_OUTPUT"
           echo "size=$SIZE"     >> "$GITHUB_OUTPUT"
@@ -173,7 +183,13 @@ jobs:
           else
             ARCHIVE_SHA="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
           fi
-          ARCHIVE_SIZE="$(stat -c '%s' "$ARCHIVE" 2>/dev/null || stat -f '%z' "$ARCHIVE")"
+          ARCHIVE_SIZE="$(stat -c '%s' "$ARCHIVE" 2>/dev/null || stat -f '%z' "$ARCHIVE" 2>/dev/null || echo "")"
+          # Same JSON-interpolation guard as the binary size: an empty value
+          # would render the manifest as `"archive_size": ,` (invalid JSON).
+          if ! [ "$ARCHIVE_SIZE" -gt 0 ] 2>/dev/null || [ -z "$ARCHIVE_SHA" ]; then
+            echo "archive metadata missing (size='$ARCHIVE_SIZE' sha='$ARCHIVE_SHA')" >&2
+            exit 1
+          fi
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           echo "archive_name=$(basename "$ARCHIVE")" >> "$GITHUB_OUTPUT"
           echo "archive_sha=$ARCHIVE_SHA" >> "$GITHUB_OUTPUT"
@@ -196,7 +212,7 @@ jobs:
           JSON
           cat "out/manifest-${{ matrix.name }}.json"
 
-      - name: Boot smoke (linux only — windows-latest boot needs an MSYS shell dance)
+      - name: Boot smoke (linux — serve + /global/health)
         if: matrix.name == 'linux-x64'
         env:
           OPENCODE_SERVER_PASSWORD: build-smoke
@@ -210,16 +226,42 @@ jobs:
           "$BIN" serve --port 4098 --hostname 127.0.0.1 > serve.log 2>&1 &
           SP=$!
           trap 'kill "$SP" 2>/dev/null || true' EXIT
+          # curl -f: any 4xx/5xx (incl. 401 during warmup) is treated as "not yet ready",
+          # never as pass. Only a real 2xx body advances the loop.
+          READY=0
           for i in $(seq 1 20); do
-            if curl -sS -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
-                 http://127.0.0.1:4098/global/health >/dev/null 2>&1; then
-              echo "release boot smoke OK"; exit 0
+            if curl -fsS -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
+                 http://127.0.0.1:4098/global/health >/tmp/health.json 2>/dev/null; then
+              READY=1
+              break
             fi
             sleep 1
           done
-          echo "release boot smoke: health never returned" >&2
-          cat serve.log
-          exit 1
+          if [ "$READY" -ne 1 ]; then
+            echo "release boot smoke: health never returned 2xx within 20s" >&2
+            cat serve.log
+            exit 1
+          fi
+          cat /tmp/health.json
+          # /global/health success shape is { healthy: true, version: <str> }.
+          # Reject degraded/unhealthy payloads explicitly.
+          grep -qE '"healthy"[[:space:]]*:[[:space:]]*true' /tmp/health.json || \
+            (echo "release boot smoke: health endpoint did not report healthy:true" >&2; \
+             cat serve.log; exit 1)
+          echo "release boot smoke OK"
+
+      - name: Brand smoke (windows — --version reports Sato)
+        if: matrix.name == 'windows-x64'
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.bin.outputs.bin }}"
+          # bash is available on windows-latest; direct-exec the .exe is fine.
+          "$BIN" --version | tee /tmp/ver.txt
+          # Assert the Sato-branded version string got baked in (either the
+          # "+sato." version suffix or the "Sato Code" brand appears).
+          grep -qiE 'sato|\+sato\.' /tmp/ver.txt || \
+            (echo "windows release binary --version does not mention sato" >&2; exit 1)
+          echo "windows brand smoke OK"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

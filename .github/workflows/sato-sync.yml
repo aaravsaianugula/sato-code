@@ -43,6 +43,11 @@ on:
         required: false
         type: string
         default: ""
+      allow_downgrade:
+        description: "Allow force_tag < current anchor (default: rejected — protects against fat-fingered rollback)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read   # sync job overrides with the bot PAT for write access
@@ -90,6 +95,7 @@ jobs:
         id: plan
         env:
           FORCE_TAG: ${{ inputs.force_tag }}
+          ALLOW_DOWNGRADE: ${{ inputs.allow_downgrade }}
         run: |
           set -euo pipefail
 
@@ -116,6 +122,20 @@ jobs:
             exit 2
           fi
 
+          # Downgrade guard — a fat-fingered force_tag with an OLDER tag would
+          # regress the anchor. Reject unless the operator explicitly opted in
+          # via `allow_downgrade: true` on workflow_dispatch. Uses sort -V because
+          # pick-upstream-tag.sh already emits strict `v<M>.<m>.<p>` semver.
+          OLDER="$(printf '%s\n%s\n' "$TARGET" "$CURRENT" | sort -V | head -1)"
+          if [ "$OLDER" = "$TARGET" ] && [ "$TARGET" != "$CURRENT" ]; then
+            if [ "${ALLOW_DOWNGRADE}" != "true" ]; then
+              echo "sync: refusing to downgrade anchor $CURRENT -> $TARGET (older)." >&2
+              echo "      re-dispatch with allow_downgrade: true to override." >&2
+              exit 2
+            fi
+            echo "sync: allow_downgrade=true — accepting downgrade $CURRENT -> $TARGET."
+          fi
+
           TS="$(date -u +%Y%m%dT%H%M%SZ)"
           BRANCH="sync/${TARGET}-${TS}"
           git checkout -b "$BRANCH"
@@ -139,10 +159,19 @@ jobs:
             exit 0
           fi
 
-          # Merge went clean — commit it.
+          # Merge went clean. If merge --no-ff produced no staged changes (e.g.
+          # target is already an ancestor via a prior squash), skip the noisy
+          # --allow-empty commit and treat the sync as already-synced.
+          if git diff --cached --quiet && git diff --quiet; then
+            echo "sync: nothing to commit after merge — treating as already-synced (squash-history)."
+            echo "status=already-synced" >> "$GITHUB_OUTPUT"
+            echo "target_tag=$TARGET" >> "$GITHUB_OUTPUT"
+            echo "sync_branch=" >> "$GITHUB_OUTPUT"
+            echo "head_sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           git commit -m "sync: merge upstream $TARGET into sato-main" \
-                     -m "Automated advance of SATO_UPSTREAM.txt anchor from $CURRENT to $TARGET." \
-                     --allow-empty
+                     -m "Automated advance of SATO_UPSTREAM.txt anchor from $CURRENT to $TARGET."
 
           # Re-verify all sato-patches still apply against the new anchor.
           if ! bash scripts/apply-patches.sh --check; then
@@ -245,8 +274,19 @@ jobs:
           PR_NUMBER: ${{ needs.sync.outputs.pr_number }}
         run: |
           set -euo pipefail
-          # --auto respects branch protection required checks. Even without
-          # protection configured, we only reach this step if `ci` succeeded.
+          # ── LOAD-BEARING: branch protection on sato-main is REQUIRED ──────────
+          # `gh pr merge --auto` hands control over to GitHub's own merge queue.
+          # From that point on, further pushes to the sync branch are re-gated
+          # ONLY by GitHub's required-checks list on the base branch. If a human
+          # pushes a commit onto the sync branch between "auto-merge enabled" and
+          # "merge fires", THAT push is what gets merged — and it will only be
+          # re-checked if sato-ci is configured as a REQUIRED check on
+          # sato-main. Without branch protection, `--auto` can land an un-CI'd
+          # commit. Enforce:
+          #   Settings → Branches → sato-main → Require status checks →
+          #     "sato-ci gates (linux-x64)" (required).
+          # This is the load-bearing user-side setup, not merely
+          # defense-in-depth. See SATO_README.md § "Bot PAT" for the full list.
           gh pr merge "$PR_NUMBER" --squash --auto --delete-branch --repo "$GITHUB_REPOSITORY"
 
   # ── Patch-rot alarm — opens/updates an issue when sync failures accumulate.
