@@ -1,0 +1,336 @@
+name: sato-sync
+
+# Sato-Code upstream auto-sync.
+#
+# Runs daily and on demand. Advances the sato-main anchor (SATO_UPSTREAM.txt)
+# to the newest upstream RELEASE TAG — never the dev branch, never a pre-release.
+#
+# ── Security posture ────────────────────────────────────────────────────────
+#   This workflow merges UPSTREAM code into our fork. That is a privileged
+#   operation. We defend against a malicious/broken upstream release by:
+#     1. Refusing to auto-merge unless the sato-ci gates pass FIRST. The
+#        sato-ci.yml is invoked as `uses: workflow_call` and is a hard
+#        `needs:` dependency of the auto-merge job — GitHub cannot run
+#        automerge until CI is green.
+#     2. Auto-merge is a squash merge into sato-main, so the upstream tag is
+#        collapsed into a single reviewable Sato commit — never left as loose
+#        upstream commits on the default branch.
+#     3. Any merge conflict or patch-application failure ends the flow at the
+#        "open labeled PR for human" step. `sync-conflict` PRs never auto-merge.
+#     4. Bot PAT is least-privilege (see USER ACTIONS below).
+#
+# ── User-side setup (required before this workflow can operate) ────────────
+#   1. Create a fine-grained GitHub PAT named SATO_BOT_PAT with:
+#        Repository: aaravsaianugula/sato-code (only this repo)
+#        Permissions: Contents: Read & Write; Pull requests: Read & Write;
+#                     Issues: Read & Write; Metadata: Read.
+#      Store as an Actions secret (Settings → Secrets and variables → Actions).
+#   2. Enable "Allow GitHub Actions to create and approve pull requests" in
+#      repo settings.
+#   3. Add a branch-protection rule on `sato-main`:
+#        - Require pull request; Require sato-ci gates to pass; Restrict who
+#          can push; Do NOT require signed commits from bot (or configure the
+#          bot to sign).
+#   4. Enable Actions on this repository.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"  # 06:17 UTC daily (offset from typical top-of-hour cron pileup)
+  workflow_dispatch:
+    inputs:
+      force_tag:
+        description: "Force sync to this specific upstream tag (default: pick newest)"
+        required: false
+        type: string
+        default: ""
+      allow_downgrade:
+        description: "Allow force_tag < current anchor (default: rejected — protects against fat-fingered rollback)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read   # sync job overrides with the bot PAT for write access
+  pull-requests: read
+
+concurrency:
+  group: sato-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: pick tag, merge, open PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      status:       ${{ steps.plan.outputs.status }}        # already-synced | conflict | patch-broken | ready
+      target_tag:   ${{ steps.plan.outputs.target_tag }}
+      pr_number:    ${{ steps.pr.outputs.pr_number }}
+      sync_branch:  ${{ steps.plan.outputs.sync_branch }}
+      head_sha:     ${{ steps.plan.outputs.head_sha }}
+    steps:
+      - name: Checkout sato-main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: sato-main
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.SATO_BOT_PAT }}
+
+      - name: Configure git identity (bot)
+        run: |
+          git config user.email "sato-bot@users.noreply.github.com"
+          git config user.name  "sato-bot"
+
+      - name: Add upstream remote + fetch tags (read-only)
+        run: |
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            git remote add upstream https://github.com/anomalyco/opencode.git
+          fi
+          # Disable pushes to upstream defensively.
+          git remote set-url --push upstream DISABLED_NO_PUSH_TO_UPSTREAM
+          git fetch upstream --tags --prune
+
+      - name: Plan sync (pick tag, decide merge path)
+        id: plan
+        env:
+          FORCE_TAG: ${{ inputs.force_tag }}
+          ALLOW_DOWNGRADE: ${{ inputs.allow_downgrade }}
+        run: |
+          set -euo pipefail
+
+          CURRENT="$(grep -E '^anchor=' SATO_UPSTREAM.txt | cut -d= -f2 | tr -d '[:space:]')"
+          if [ -n "$FORCE_TAG" ]; then
+            TARGET="$FORCE_TAG"
+          else
+            TARGET="$(bash scripts/pick-upstream-tag.sh)"
+          fi
+          echo "current anchor: $CURRENT"
+          echo "target tag:     $TARGET"
+
+          if [ "$TARGET" = "$CURRENT" ]; then
+            echo "status=already-synced" >> "$GITHUB_OUTPUT"
+            echo "target_tag=$TARGET" >> "$GITHUB_OUTPUT"
+            echo "sync_branch=" >> "$GITHUB_OUTPUT"
+            echo "head_sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Verify target actually exists as a tag.
+          if ! git rev-parse --verify --quiet "refs/tags/${TARGET}^{commit}" >/dev/null; then
+            echo "planned target tag $TARGET is not a known local ref after fetch" >&2
+            exit 2
+          fi
+
+          # Downgrade guard — a fat-fingered force_tag with an OLDER tag would
+          # regress the anchor. Reject unless the operator explicitly opted in
+          # via `allow_downgrade: true` on workflow_dispatch. Uses sort -V because
+          # pick-upstream-tag.sh already emits strict `v<M>.<m>.<p>` semver.
+          OLDER="$(printf '%s\n%s\n' "$TARGET" "$CURRENT" | sort -V | head -1)"
+          if [ "$OLDER" = "$TARGET" ] && [ "$TARGET" != "$CURRENT" ]; then
+            if [ "${ALLOW_DOWNGRADE}" != "true" ]; then
+              echo "sync: refusing to downgrade anchor $CURRENT -> $TARGET (older)." >&2
+              echo "      re-dispatch with allow_downgrade: true to override." >&2
+              exit 2
+            fi
+            echo "sync: allow_downgrade=true — accepting downgrade $CURRENT -> $TARGET."
+          fi
+
+          TS="$(date -u +%Y%m%dT%H%M%SZ)"
+          BRANCH="sync/${TARGET}-${TS}"
+          git checkout -b "$BRANCH"
+
+          # Merge upstream tag with --no-ff so the sync commit is always distinct
+          # and reviewable. --no-commit lets us inspect conflicts before committing.
+          if ! git merge --no-ff --no-commit "$TARGET" 2>merge.err; then
+            cat merge.err >&2 || true
+            echo "merge produced conflicts — will push branch with conflict markers for human resolution"
+            # Commit the conflict state so the PR has something to render. Add all
+            # marker'd files so the reviewer sees the conflict directly.
+            git add -A
+            git commit --allow-empty -m "sync: MERGE CONFLICT with upstream $TARGET" \
+              -m "Automated sync failed to merge upstream tag $TARGET cleanly." \
+              -m "Resolve conflicts, run scripts/verify-thin-fork.sh + scripts/apply-patches.sh --check locally, then push."
+            git push -f origin "$BRANCH"
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            echo "target_tag=$TARGET" >> "$GITHUB_OUTPUT"
+            echo "sync_branch=$BRANCH" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Merge went clean. If merge --no-ff produced no staged changes (e.g.
+          # target is already an ancestor via a prior squash), skip the noisy
+          # --allow-empty commit and treat the sync as already-synced.
+          if git diff --cached --quiet && git diff --quiet; then
+            echo "sync: nothing to commit after merge — treating as already-synced (squash-history)."
+            echo "status=already-synced" >> "$GITHUB_OUTPUT"
+            echo "target_tag=$TARGET" >> "$GITHUB_OUTPUT"
+            echo "sync_branch=" >> "$GITHUB_OUTPUT"
+            echo "head_sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "sync: merge upstream $TARGET into sato-main" \
+                     -m "Automated advance of SATO_UPSTREAM.txt anchor from $CURRENT to $TARGET."
+
+          # Re-verify all sato-patches still apply against the new anchor.
+          if ! bash scripts/apply-patches.sh --check; then
+            echo "one or more sato-patches no longer apply against $TARGET"
+            git push -f origin "$BRANCH"
+            echo "status=patch-broken" >> "$GITHUB_OUTPUT"
+            echo "target_tag=$TARGET" >> "$GITHUB_OUTPUT"
+            echo "sync_branch=$BRANCH" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Advance SATO_UPSTREAM.txt to record the new anchor.
+          sed -i.bak -E "s|^anchor=.*|anchor=${TARGET}|; s|^synced_at=.*|synced_at=$(date -u +%Y-%m-%d)|" SATO_UPSTREAM.txt
+          rm -f SATO_UPSTREAM.txt.bak
+          git add SATO_UPSTREAM.txt
+          git commit -m "sync: advance anchor to ${TARGET}" \
+                     -m "Auto-updated by sato-sync. All sato-patches/*.patch re-verified via --check."
+
+          git push -f origin "$BRANCH"
+          echo "status=ready" >> "$GITHUB_OUTPUT"
+          echo "target_tag=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "sync_branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR (or short-circuit if already synced)
+        id: pr
+        if: steps.plan.outputs.status != 'already-synced'
+        env:
+          GH_TOKEN: ${{ secrets.SATO_BOT_PAT }}
+          STATUS: ${{ steps.plan.outputs.status }}
+          TARGET: ${{ steps.plan.outputs.target_tag }}
+          BRANCH: ${{ steps.plan.outputs.sync_branch }}
+        run: |
+          set -euo pipefail
+
+          case "$STATUS" in
+            ready)
+              LABELS="sync,auto-merge"
+              TITLE="sync: upstream ${TARGET}"
+              BODY=$'Automated upstream sync.\n\n'"* Target tag: \`${TARGET}\`"$'\n* All sato-patches re-verified via `--check`.\n* Waits on sato-ci; only auto-merges when green.'
+              ;;
+            conflict)
+              LABELS="sync,sync-conflict"
+              TITLE="sync-conflict: upstream ${TARGET} does not merge cleanly"
+              BODY=$'Merge conflict with upstream **'"${TARGET}"$'**.\n\nA human must:\n1. Check out `'"${BRANCH}"$'`.\n2. Resolve conflicts.\n3. Run `scripts/verify-thin-fork.sh` + `scripts/apply-patches.sh --check`.\n4. Push.\n\nThis PR will **not** auto-merge.'
+              ;;
+            patch-broken)
+              LABELS="sync,sync-conflict,patches-broken"
+              TITLE="sync-conflict: sato-patches do not apply against ${TARGET}"
+              BODY=$'Merge succeeded but one or more `sato-patches/*.patch` no longer apply against **'"${TARGET}"$'**.\n\nA human must:\n1. Check out `'"${BRANCH}"$'`.\n2. Regenerate the broken patch (`git am --3way`, resolve, `git format-patch`).\n3. Re-run `scripts/apply-patches.sh --check`.\n4. Push.\n\nThis PR will **not** auto-merge.'
+              ;;
+            *)
+              echo "unknown status: $STATUS" >&2; exit 2;;
+          esac
+
+          # Ensure labels exist (idempotent).
+          for L in sync auto-merge sync-conflict patches-broken patch-rot-alarm; do
+            gh label create "$L" --color BFD4F2 --description "sato-sync workflow label" 2>/dev/null || true
+          done
+
+          PR_URL="$(gh pr create \
+            --base sato-main \
+            --head "$BRANCH" \
+            --title "$TITLE" \
+            --body  "$BODY" \
+            --label "$(echo "$LABELS" | tr ',' '\n' | paste -sd ',' -)" 2>&1 || true)"
+
+          # If a PR from this branch already exists (rerun), grab it instead of failing.
+          if ! echo "$PR_URL" | grep -qE 'https://github.com/.+/pull/[0-9]+'; then
+            PR_URL="$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url')"
+          fi
+
+          PR_NUMBER="$(echo "$PR_URL" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+')"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "opened PR: $PR_URL"
+
+  # ── CI gate — MUST run before auto-merge. ────────────────────────────────
+  # Only invoked when status=ready (clean merge + patches still apply).
+  # If sato-ci fails, the `automerge` job never runs (needs: [sync, ci]).
+  ci:
+    needs: sync
+    if: needs.sync.outputs.status == 'ready'
+    uses: ./.github/workflows/sato-ci.yml
+    with:
+      ref: ${{ needs.sync.outputs.sync_branch }}
+    permissions:
+      contents: read
+      checks: write
+
+  automerge:
+    needs: [sync, ci]
+    if: needs.sync.outputs.status == 'ready'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Enable auto-merge (squash) — will only merge if branch protection is green
+        env:
+          GH_TOKEN: ${{ secrets.SATO_BOT_PAT }}
+          PR_NUMBER: ${{ needs.sync.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          # ── LOAD-BEARING: branch protection on sato-main is REQUIRED ──────────
+          # `gh pr merge --auto` hands control over to GitHub's own merge queue.
+          # From that point on, further pushes to the sync branch are re-gated
+          # ONLY by GitHub's required-checks list on the base branch. If a human
+          # pushes a commit onto the sync branch between "auto-merge enabled" and
+          # "merge fires", THAT push is what gets merged — and it will only be
+          # re-checked if sato-ci is configured as a REQUIRED check on
+          # sato-main. Without branch protection, `--auto` can land an un-CI'd
+          # commit. Enforce:
+          #   Settings → Branches → sato-main → Require status checks →
+          #     "sato-ci gates (linux-x64)" (required).
+          # This is the load-bearing user-side setup, not merely
+          # defense-in-depth. See SATO_README.md § "Bot PAT" for the full list.
+          gh pr merge "$PR_NUMBER" --squash --auto --delete-branch --repo "$GITHUB_REPOSITORY"
+
+  # ── Patch-rot alarm — opens/updates an issue when sync failures accumulate.
+  alarm:
+    needs: sync
+    if: needs.sync.outputs.status == 'conflict' || needs.sync.outputs.status == 'patch-broken'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Checkout (for gh context only)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Ensure patch-rot-alarm issue reflects current backlog
+        env:
+          GH_TOKEN: ${{ secrets.SATO_BOT_PAT }}
+          STATUS: ${{ needs.sync.outputs.status }}
+          TARGET: ${{ needs.sync.outputs.target_tag }}
+          BRANCH: ${{ needs.sync.outputs.sync_branch }}
+          PR_NUMBER: ${{ needs.sync.outputs.pr_number }}
+          THRESHOLD: "3"
+        run: |
+          set -euo pipefail
+          BACKLOG="$(gh pr list --label sync-conflict --state open --json number,title,createdAt | jq 'length')"
+          echo "open sync-conflict PRs: $BACKLOG"
+          # Ensure the alarm label exists.
+          gh label create "patch-rot-alarm" --color D93F0B --description "Sato-sync has been failing for N days" 2>/dev/null || true
+
+          EXISTING_ISSUE="$(gh issue list --label patch-rot-alarm --state open --json number --jq '.[0].number')"
+          BODY="$(printf 'Automated sato-sync has been failing.\n\nLatest attempt:\n- Status: `%s`\n- Target: `%s`\n- Branch: `%s`\n- PR: #%s\n\nOpen `sync-conflict` PRs: **%s**\n\nInvestigate with:\n- `git checkout %s`\n- `bash scripts/verify-thin-fork.sh`\n- `bash scripts/apply-patches.sh --check`\n' "$STATUS" "$TARGET" "$BRANCH" "$PR_NUMBER" "$BACKLOG" "$BRANCH")"
+
+          if [ "$BACKLOG" -ge "$THRESHOLD" ]; then
+            if [ -z "$EXISTING_ISSUE" ]; then
+              gh issue create --title "sato-sync backlog: $BACKLOG open sync-conflict PRs" \
+                              --label "patch-rot-alarm" \
+                              --body  "$BODY"
+            else
+              gh issue comment "$EXISTING_ISSUE" --body "$BODY"
+            fi
+          else
+            echo "Backlog ($BACKLOG) below alarm threshold ($THRESHOLD); no issue action."
+          fi

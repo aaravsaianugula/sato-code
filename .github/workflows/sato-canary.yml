@@ -1,0 +1,133 @@
+name: sato-canary
+
+# Sato-Code upstream-dev canary.
+#
+# Nightly early-warning: fetch upstream/dev, merge into a THROWAWAY branch (never
+# pushed), attempt `scripts/apply-patches.sh --check`, and attempt a linux-x64
+# build. If any step fails, open (or update) a `canary-fail` issue so a human
+# can pre-fix patches before the next tagged upstream release.
+#
+# This workflow NEVER merges anything to sato-main. It is a look-ahead only.
+
+on:
+  schedule:
+    - cron: "43 8 * * *"  # 08:43 UTC — well after sato-sync
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: sato-canary
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      status: ${{ steps.result.outputs.status }}
+      log:    ${{ steps.result.outputs.log }}
+    steps:
+      - name: Checkout sato-main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: sato-main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure git identity
+        run: |
+          git config user.email "sato-canary@users.noreply.github.com"
+          git config user.name  "sato-canary"
+
+      - name: Add upstream + fetch dev
+        run: |
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            git remote add upstream https://github.com/anomalyco/opencode.git
+          fi
+          git remote set-url --push upstream DISABLED_NO_PUSH_TO_UPSTREAM
+          git fetch upstream dev --no-tags
+
+      - name: Merge upstream/dev into throwaway branch
+        id: merge
+        run: |
+          set -euo pipefail
+          git checkout -b _canary_$(date -u +%s)
+          if ! git merge --no-ff --no-commit upstream/dev; then
+            echo "canary_status=merge-conflict" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          git commit --allow-empty -m "canary: merge upstream/dev"
+          echo "canary_status=merged" >> "$GITHUB_ENV"
+
+      - name: apply-patches --check
+        if: env.canary_status == 'merged'
+        run: bash scripts/apply-patches.sh --check || echo "canary_status=patch-broken" >> "$GITHUB_ENV"
+
+      - name: Apply patches for build
+        if: env.canary_status == 'merged'
+        run: bash scripts/apply-patches.sh
+
+      - name: Install native prereqs
+        if: env.canary_status == 'merged'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3 python3-setuptools unzip
+
+      - name: Setup Bun + install
+        if: env.canary_status == 'merged'
+        uses: ./.github/actions/setup-bun
+
+      - name: Attempt branded build
+        if: env.canary_status == 'merged'
+        env:
+          OPENCODE_VERSION: "canary+sato.dev"
+          OPENCODE_CHANNEL: "dev"
+          SATO_BRAND: "Sato Code"
+        run: |
+          # SKIP_VERIFY=1 SKIP_APPLY=1 since we've already run those.
+          SKIP_VERIFY=1 SKIP_APPLY=1 \
+            bun run --cwd packages/opencode build --single --skip-embed-web-ui --skip-install \
+            || echo "canary_status=build-broken" >> "$GITHUB_ENV"
+
+      - name: Compute result
+        id: result
+        run: |
+          S="${canary_status:-merged}"
+          echo "status=$S" >> "$GITHUB_OUTPUT"
+          # Prepare a short log excerpt for the issue.
+          echo "log=canary result=$S at $(date -u +%FT%TZ)" >> "$GITHUB_OUTPUT"
+
+  alarm:
+    needs: canary
+    if: needs.canary.outputs.status != 'merged'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update canary-fail issue
+        env:
+          GH_TOKEN: ${{ secrets.SATO_BOT_PAT || secrets.GITHUB_TOKEN }}
+          STATUS: ${{ needs.canary.outputs.status }}
+          LOG:    ${{ needs.canary.outputs.log }}
+        run: |
+          set -euo pipefail
+          gh label create "canary-fail" --color FBCA04 \
+            --description "sato-canary is unhappy with upstream/dev" 2>/dev/null || true
+          EXISTING="$(gh issue list --label canary-fail --state open --json number --jq '.[0].number' \
+                       --repo "$GITHUB_REPOSITORY")"
+          BODY="$(printf 'Nightly sato-canary against upstream/dev is failing.\n\n- Status: `%s`\n- Log: %s\n\nThis is a **look-ahead** — sato-main is unaffected. Investigate before the next upstream release tag lands or sato-sync will produce a sync-conflict.' "$STATUS" "$LOG")"
+          if [ -z "$EXISTING" ]; then
+            gh issue create --title "canary-fail: upstream/dev breaks Sato ($STATUS)" \
+                            --label canary-fail \
+                            --body "$BODY" \
+                            --repo "$GITHUB_REPOSITORY"
+          else
+            gh issue comment "$EXISTING" --body "$BODY" --repo "$GITHUB_REPOSITORY"
+          fi

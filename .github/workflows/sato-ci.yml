@@ -1,0 +1,213 @@
+name: sato-ci
+
+# Sato-Code CI: cheap → expensive gates for a thin-fork PR.
+#
+# Runs on:
+#   - Every PR targeting sato-main or sato-dev.
+#   - workflow_call from sato-sync.yml (before auto-merging an upstream sync PR).
+#
+# Gate order (fail fast):
+#   1. bun install (native prereqs pre-installed)
+#   2. verify-thin-fork.sh  — no committed drift into upstream tree
+#   3. apply-patches.sh --check  — every sato-patches/*.patch still applies
+#   4. Actually apply patches (git am) into the ephemeral CI checkout
+#   5. Typecheck sato packages (turbo filter)
+#   6. Build a branded Sato-Code CLI for linux-x64 (--single --skip-embed-web-ui)
+#   7. Boot smoke  — start the built binary in `serve` mode, curl /global/health
+#   8. Brand smoke — `--version` reports the sato-tagged version, `--help` mentions "Sato Code"
+#   9. Route-header smoke — sato-headers module is wired into provider + processor
+#
+# Notes for future maintainers:
+#   - No bun.lock is committed. We deliberately DO NOT pass --frozen-lockfile.
+#     The composite `./.github/actions/setup-bun` from upstream handles the install.
+#   - The workflow builds ONE target (linux-x64) with --skip-embed-web-ui so the
+#     turnaround is minutes, not tens of minutes. Full multi-target release builds
+#     live in sato-build.yml (only on release tag or manual dispatch).
+#   - `workflow_call` is what makes this reusable from sato-sync.yml.
+
+on:
+  pull_request:
+    branches:
+      - sato-main
+      - sato-dev
+  workflow_call:
+    inputs:
+      ref:
+        description: "Ref to check out (defaults to github.ref)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  checks: write
+
+concurrency:
+  group: sato-ci-${{ github.event.pull_request.number || inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: sato-ci gates (linux-x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0  # need history for verify-thin-fork's git diff against anchor
+          fetch-tags: true
+
+      - name: Fetch upstream tags (for anchor resolution)
+        run: |
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            git remote add upstream https://github.com/anomalyco/opencode.git
+          fi
+          # Fetch ONLY tags (read-only) — no branches from upstream ever pulled in CI.
+          git -c protocol.version=2 fetch --no-tags upstream \
+            "+refs/tags/v*:refs/tags/v*" --depth=1 || \
+            git fetch upstream --tags
+
+      - name: Install native build prereqs (node-gyp, node-pty)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3 python3-setuptools unzip
+
+      - name: Setup Bun + install deps
+        uses: ./.github/actions/setup-bun
+
+      - name: Configure git identity (for git am inside CI)
+        run: |
+          git config --global user.email "sato-ci@users.noreply.github.com"
+          git config --global user.name  "sato-ci"
+
+      - name: Gate 1 — verify thin-fork (no committed drift into upstream tree)
+        run: bash scripts/verify-thin-fork.sh
+
+      - name: Gate 2 — apply-patches.sh --check (every patch still applies)
+        run: bash scripts/apply-patches.sh --check
+
+      - name: Apply patches into ephemeral CI tree
+        # verify-thin-fork ran on the committed tree (correct). Now we actually apply
+        # the patches so the rest of the pipeline (typecheck / build / smokes) can
+        # exercise the patched code. These commits live only in the CI job.
+        run: bash scripts/apply-patches.sh
+
+      - name: Gate 3 — typecheck sato packages
+        # Restrict to sato-* packages so a CI green is unambiguous about our layer
+        # (upstream typecheck failures are their problem, not ours).
+        # NOTE: No `|| true` anywhere in this gate — a real TS error MUST fail the
+        # workflow. `bun turbo typecheck --filter` succeeds trivially when no sato-*
+        # package has a `typecheck` script wired yet, so we ALSO run `tsc --noEmit`
+        # directly against sato-plugin's tsconfig as the load-bearing check.
+        # (sato-app is a Vite/Solid app whose tsc gate belongs in the Vite build,
+        # not here; sato-plugin is the one with real logic and strict:true.)
+        run: |
+          set -euo pipefail
+          bun turbo typecheck --filter='./packages/sato-*'
+          bun --cwd packages/sato-plugin exec tsc --noEmit
+
+      - name: Gate 4 — build branded linux-x64 CLI (skin skipped)
+        # --skip-embed-web-ui skips the sato-app skin build for CI turnaround.
+        # sato-build.yml embeds the skin for release artifacts.
+        run: |
+          OPENCODE_VERSION="$(grep -E '^anchor=' SATO_UPSTREAM.txt | cut -d= -f2 | sed 's/^v//')+sato.ci" \
+          OPENCODE_CHANNEL="dev" \
+          SATO_BRAND="Sato Code" \
+            bun run --cwd packages/opencode build --single --skip-embed-web-ui --skip-install
+          find packages/opencode/dist -maxdepth 3 -type f \( -name opencode -o -name 'opencode.exe' \) -printf '%p\n'
+
+      - name: Locate built binary
+        id: bin
+        run: |
+          BIN="$(find packages/opencode/dist -maxdepth 3 -type f -name opencode | head -1)"
+          if [ -z "$BIN" ]; then
+            echo "no linux-x64 binary produced" >&2; exit 1
+          fi
+          chmod +x "$BIN"
+          echo "path=$BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Gate 5 — boot smoke (serve + /global/health)
+        env:
+          OPENCODE_SERVER_PASSWORD: ci-smoke
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.bin.outputs.path }}"
+          "$BIN" serve --port 4099 --hostname 127.0.0.1 --print-logs > serve.log 2>&1 &
+          SERVE_PID=$!
+          trap 'kill "$SERVE_PID" 2>/dev/null || true' EXIT
+          # Poll for readiness (up to 30s).
+          # curl -f fails on 4xx/5xx (so 401 during startup no longer looks "ready");
+          # only a real 2xx with a body advances the loop.
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
+                 http://127.0.0.1:4099/global/health >/tmp/health.json 2>/dev/null; then
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$READY" -ne 1 ]; then
+            echo "health endpoint never returned 2xx within 30s" >&2
+            echo "---serve.log---"; cat serve.log
+            exit 1
+          fi
+          cat /tmp/health.json
+          # Positive assertion: /global/health success shape is { healthy: true, version: <str> }.
+          # A degraded/unhealthy payload (e.g. {"healthy":false,...} or {"status":"unhealthy"})
+          # MUST fail this gate — grepping only for the field name would let those through.
+          grep -qE '"healthy"[[:space:]]*:[[:space:]]*true' /tmp/health.json || \
+            (echo "health endpoint did not report healthy:true" >&2; \
+             echo "---serve.log---"; cat serve.log; exit 1)
+
+      - name: Gate 6 — brand smoke (--version + --help mention Sato)
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.bin.outputs.path }}"
+          VER="$("$BIN" --version 2>&1 || true)"
+          echo "version output: $VER"
+          echo "$VER" | grep -qi 'sato' || \
+            (echo "brand smoke: --version did not contain 'sato' (built without SATO_BRAND?)" >&2; exit 1)
+          HLP="$("$BIN" --help 2>&1 || true)"
+          echo "$HLP" | grep -qi 'sato' || \
+            (echo "brand smoke: --help did not mention Sato" >&2; \
+             echo "$HLP" | head -20; exit 1)
+
+      - name: Gate 7 — route-header smoke (sato-headers wired in)
+        # Static wiring assertion (no full turn drive needed):
+        # verifies patch 0002 successfully stitched the SatoResponseHeaders capture
+        # into provider.ts + processor.ts. This is the cheap complement of the
+        # full end-to-end route-metadata check that lives in packages/sato-plugin's
+        # test suite.
+        run: |
+          set -euo pipefail
+          test -f packages/opencode/src/provider/sato-headers.ts || \
+            (echo "route-header smoke: sato-headers.ts not present after apply-patches" >&2; exit 1)
+          grep -q 'SatoResponseHeaders\.set(' packages/opencode/src/provider/provider.ts || \
+            (echo "route-header smoke: SatoResponseHeaders.set(...) not wired into provider.ts" >&2; exit 1)
+          grep -q 'SatoResponseHeaders\.take(' packages/opencode/src/session/processor.ts || \
+            (echo "route-header smoke: SatoResponseHeaders.take(...) not wired into processor.ts" >&2; exit 1)
+          # Round-trip the module in isolation to prove the set/take contract holds.
+          bun --cwd packages/opencode -e "
+            import { SatoResponseHeaders } from './src/provider/sato-headers.ts';
+            SatoResponseHeaders.set('sid', { 'x-sato-route': '{\"primary\":\"m\"}' });
+            const h = SatoResponseHeaders.take('sid');
+            if (!h || h['x-sato-route'] !== '{\"primary\":\"m\"}') throw new Error('set/take round-trip failed');
+            if (SatoResponseHeaders.take('sid') !== undefined) throw new Error('take did not clear');
+            console.log('route-header smoke: SatoResponseHeaders set/take round-trip OK');
+          "
+
+      - name: Upload serve.log on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: serve-log
+          path: serve.log
+          if-no-files-found: ignore
+          retention-days: 7
