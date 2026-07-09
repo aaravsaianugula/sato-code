@@ -1,0 +1,255 @@
+/*
+ * Sato Ember — web-UI skin for Sato-Code.
+ *
+ * Maps the Sato brand palette (accent oklch(0.72 0.13 55), warm-dark canvas
+ * oklch(0.19 0.014 60), ivory text oklch(0.94 0.01 85)) onto the REAL CSS
+ * custom-property names @opencode-ai/ui uses in packages/ui/src/styles/theme.css.
+ *
+ * Only user-visible surface variables are overridden (background/surface,
+ * text, border, icon, interactive/brand, syntax, and markdown accents).
+ * Semantic tiers upstream expects (success/warning/critical/info) keep their
+ * meaning-driven hues — only intensity is tuned to sit on the warm canvas.
+ *
+ * Selectors: opencode's preload script writes `data-theme` (theme id) and
+ * `data-color-scheme` ("dark" | "light") on <html>. We claim the Sato theme
+ * ids `sato-dark` / `sato-light` AND also apply as a default so the wrapper
+ * app (which sets `data-theme="sato-dark"` in index.html before preload runs)
+ * paints correctly on first render.
+ */
+
+:root[data-theme="sato-dark"],
+:root[data-color-scheme="dark"][data-theme="sato-dark"],
+:root[data-sato-theme="sato-dark"] {
+  color-scheme: dark;
+  --text-mix-blend-mode: plus-lighter;
+
+  /* Canvas — warm-dark ember base */
+  --background-base: oklch(0.19 0.014 60);
+  --background-weak: oklch(0.22 0.014 60);
+  --background-strong: oklch(0.16 0.014 60);
+  --background-stronger: oklch(0.14 0.014 60);
+
+  /* Surfaces — layered warm-charcoal */
+  --surface-base: oklch(0.24 0.014 60 / 0.35);
+  --base: oklch(0.24 0.014 60 / 0.4);
+  --surface-base-hover: oklch(0.27 0.016 60 / 0.5);
+  --surface-base-active: oklch(0.3 0.018 60 / 0.55);
+  --surface-base-interactive-active: oklch(0.72 0.13 55 / 0.18);
+  --base2: oklch(0.24 0.014 60 / 0.4);
+  --base3: oklch(0.24 0.014 60 / 0.4);
+  --surface-inset-base: oklch(0.13 0.012 60 / 0.55);
+  --surface-inset-base-hover: oklch(0.13 0.012 60 / 0.6);
+  --surface-inset-strong: oklch(0.11 0.01 60 / 0.75);
+  --surface-inset-strong-hover: oklch(0.11 0.01 60 / 0.8);
+  --surface-raised-base: oklch(0.24 0.014 60);
+  --surface-float-base: oklch(0.22 0.014 60);
+  --surface-float-base-hover: oklch(0.26 0.016 60);
+  --surface-raised-base-hover: oklch(0.27 0.016 60);
+  --surface-raised-base-active: oklch(0.3 0.018 60);
+  --surface-raised-strong: oklch(0.25 0.015 60);
+  --surface-raised-strong-hover: oklch(0.29 0.017 60);
+  --surface-raised-stronger: oklch(0.29 0.017 60);
+  --surface-raised-stronger-hover: oklch(0.33 0.019 60);
+  --surface-raised-stronger-non-alpha: oklch(0.29 0.017 60);
+  --surface-stronger-non-alpha: oklch(0.29 0.017 60);
+  --surface-weak: oklch(0.24 0.014 60);
+  --surface-weaker: oklch(0.27 0.016 60);
+  --surface-strong: oklch(0.31 0.018 60);
+
+  /* Ember brand: the amber-rose accent that names the theme */
+  --surface-brand-base: oklch(0.72 0.13 55);
+  --surface-brand-hover: oklch(0.77 0.13 55);
+
+  /* Interactive — ember tint replaces the upstream cornflower-blue */
+  --surface-interactive-base: oklch(0.31 0.06 55);
+  --surface-interactive-hover: oklch(0.36 0.07 55);
+  --surface-interactive-weak: oklch(0.23 0.03 55);
+  --surface-interactive-weak-hover: oklch(0.28 0.04 55);
+
+  /* Inputs */
+  --input-base: oklch(0.22 0.014 60);
+  --input-hover: oklch(0.24 0.014 60);
+  --input-active: oklch(0.26 0.03 55);
+  --input-selected: oklch(0.28 0.04 55);
+  --input-focus: oklch(0.26 0.03 55);
+  --input-disabled: oklch(0.2 0.012 60);
+
+  /* Text — ivory on warm canvas */
+  --text-base: oklch(0.82 0.01 85);
+  --text-weak: oklch(0.66 0.012 75);
+  --text-weaker: oklch(0.5 0.01 70);
+  --text-strong: oklch(0.94 0.01 85);
+  --text-stronger: oklch(0.98 0.01 85);
+  --text-invert-base: oklch(0.36 0.01 75);
+  --text-invert-weak: oklch(0.28 0.01 75);
+  --text-invert-weaker: oklch(0.22 0.01 75);
+  --text-invert-strong: oklch(0.15 0.01 75);
+  --text-interactive-base: oklch(0.78 0.11 55);
+  --text-on-brand-base: oklch(0.15 0.02 60);
+  --text-on-brand-weak: oklch(0.25 0.02 60);
+  --text-on-brand-weaker: oklch(0.35 0.02 60);
+  --text-on-brand-strong: oklch(0.08 0.02 60);
+  --text-on-interactive-base: oklch(0.94 0.01 85);
+  --text-on-interactive-weak: oklch(0.82 0.01 85);
+
+  /* Buttons */
+  --button-primary-base: oklch(0.72 0.13 55);
+  --button-secondary-base: oklch(0.24 0.014 60);
+  --button-secondary-hover: oklch(0.28 0.016 60);
+  --button-ghost-hover: oklch(0.94 0.01 85 / 0.05);
+  --button-ghost-hover2: oklch(0.94 0.01 85 / 0.09);
+
+  /* Borders — quiet warm-neutral, brand-tinted on select/focus */
+  --border-base: oklch(0.94 0.01 85 / 0.14);
+  --border-hover: oklch(0.94 0.01 85 / 0.22);
+  --border-active: oklch(0.94 0.01 85 / 0.36);
+  --border-selected: oklch(0.72 0.13 55);
+  --border-disabled: oklch(0.94 0.01 85 / 0.16);
+  --border-focus: oklch(0.72 0.13 55);
+  --border-weak-base: oklch(0.31 0.014 60);
+  --border-weak-hover: oklch(0.94 0.01 85 / 0.12);
+  --border-weak-active: oklch(0.94 0.01 85 / 0.2);
+  --border-weak-selected: oklch(0.72 0.13 55 / 0.5);
+  --border-weak-disabled: oklch(0.94 0.01 85 / 0.08);
+  --border-weak-focus: oklch(0.94 0.01 85 / 0.2);
+  --border-weaker-base: oklch(0.26 0.014 60);
+  --border-weaker-hover: oklch(0.94 0.01 85 / 0.06);
+  --border-weaker-active: oklch(0.94 0.01 85 / 0.1);
+  --border-weaker-selected: oklch(0.72 0.13 55 / 0.28);
+  --border-weaker-disabled: oklch(0.94 0.01 85 / 0.03);
+  --border-weaker-focus: oklch(0.94 0.01 85 / 0.1);
+  --border-strong-base: oklch(0.94 0.01 85 / 0.22);
+  --border-strong-hover: oklch(0.94 0.01 85 / 0.22);
+  --border-strong-active: oklch(0.94 0.01 85 / 0.22);
+  --border-strong-selected: oklch(0.72 0.13 55 / 0.55);
+  --border-strong-disabled: oklch(0.94 0.01 85 / 0.1);
+  --border-strong-focus: oklch(0.94 0.01 85 / 0.22);
+  --border-interactive-base: oklch(0.62 0.11 55);
+  --border-interactive-hover: oklch(0.72 0.13 55);
+  --border-interactive-active: oklch(0.72 0.13 55);
+  --border-interactive-selected: oklch(0.72 0.13 55);
+  --border-interactive-disabled: oklch(0.5 0.02 60);
+  --border-interactive-focus: oklch(0.72 0.13 55);
+
+  /* Icons */
+  --icon-base: oklch(0.62 0.012 75);
+  --icon-hover: oklch(0.78 0.012 75);
+  --icon-active: oklch(0.94 0.01 85);
+  --icon-selected: oklch(0.94 0.01 85);
+  --icon-disabled: oklch(0.34 0.012 60);
+  --icon-focus: oklch(0.94 0.01 85);
+  --icon-invert-base: oklch(0.22 0.014 60);
+  --icon-weak-base: oklch(0.34 0.012 60);
+  --icon-weak-hover: oklch(0.86 0.012 75);
+  --icon-weak-active: oklch(0.82 0.012 75);
+  --icon-weak-selected: oklch(0.58 0.012 75);
+  --icon-weak-disabled: oklch(0.94 0.01 85);
+  --icon-weak-focus: oklch(0.58 0.012 75);
+  --icon-strong-base: oklch(0.94 0.01 85);
+  --icon-strong-hover: oklch(0.97 0.01 85);
+  --icon-strong-active: oklch(0.98 0.01 85);
+  --icon-strong-selected: oklch(0.98 0.01 85);
+  --icon-strong-disabled: oklch(0.34 0.012 60);
+  --icon-strong-focus: oklch(0.98 0.01 85);
+  --icon-brand-base: oklch(0.72 0.13 55);
+  --icon-interactive-base: oklch(0.72 0.13 55);
+  --icon-on-interactive-base: oklch(0.94 0.01 85);
+  --icon-on-brand-base: oklch(0.15 0.02 60);
+  --icon-on-brand-hover: oklch(0.08 0.02 60);
+  --icon-on-brand-selected: oklch(0.08 0.02 60);
+
+  /* Syntax & Markdown — Sato Ember editorial */
+  --markdown-heading: oklch(0.72 0.13 55);
+  --markdown-strong: oklch(0.78 0.13 55);
+  --markdown-emph: oklch(0.72 0.09 75);
+  --markdown-link: oklch(0.72 0.13 55);
+  --markdown-link-text: oklch(0.7 0.09 190);
+  --markdown-code: oklch(0.78 0.11 155);
+  --markdown-block-quote: oklch(0.72 0.09 75);
+  --markdown-list-item: oklch(0.72 0.13 55);
+  --markdown-list-enumeration: oklch(0.7 0.09 190);
+  --markdown-image: oklch(0.72 0.13 55);
+  --markdown-image-text: oklch(0.7 0.09 190);
+  --markdown-code-block: oklch(0.94 0.01 85);
+  --markdown-text: oklch(0.94 0.01 85);
+  --markdown-horizontal-rule: oklch(0.5 0.01 70);
+  --syntax-string: oklch(0.78 0.11 155);
+  --syntax-primitive: oklch(0.78 0.13 55);
+  --syntax-property: oklch(0.75 0.12 340);
+  --syntax-type: oklch(0.85 0.13 95);
+  --syntax-constant: oklch(0.78 0.11 190);
+
+  /* Fonts — Fraunces (display), Inter (sans), JetBrains Mono (mono).
+     UI uses --font-family-sans/mono; ivory/warm tone rules the rest. */
+  --font-family-sans: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-family-mono: "JetBrainsMono Nerd Font Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+/* Light variant — same ember accent on ivory */
+:root[data-theme="sato-light"],
+:root[data-color-scheme="light"][data-theme="sato-light"] {
+  color-scheme: light;
+  --text-mix-blend-mode: multiply;
+
+  --background-base: oklch(0.98 0.006 85);
+  --background-weak: oklch(0.95 0.006 85);
+  --background-strong: oklch(0.99 0.005 85);
+  --background-stronger: oklch(1 0 0);
+
+  --surface-raised-base: oklch(1 0 0);
+  --surface-raised-strong: oklch(1 0 0);
+  --surface-raised-stronger: oklch(1 0 0);
+  --surface-raised-stronger-non-alpha: oklch(1 0 0);
+  --surface-stronger-non-alpha: oklch(1 0 0);
+  --surface-weak: oklch(0.15 0.014 60 / 0.05);
+  --surface-weaker: oklch(0.15 0.014 60 / 0.075);
+  --surface-strong: oklch(1 0 0);
+
+  --surface-brand-base: oklch(0.72 0.13 55);
+  --surface-brand-hover: oklch(0.68 0.13 55);
+  --surface-interactive-base: oklch(0.96 0.03 55);
+  --surface-interactive-hover: oklch(0.92 0.05 55);
+
+  --input-base: oklch(1 0 0);
+  --input-hover: oklch(0.98 0.006 85);
+
+  --text-base: oklch(0.42 0.012 75);
+  --text-weak: oklch(0.55 0.012 75);
+  --text-weaker: oklch(0.72 0.008 75);
+  --text-strong: oklch(0.2 0.014 60);
+  --text-stronger: oklch(0.15 0.014 60);
+  --text-interactive-base: oklch(0.58 0.13 55);
+  --text-on-brand-base: oklch(0.98 0.006 85);
+
+  --button-primary-base: oklch(0.72 0.13 55);
+  --button-secondary-base: oklch(1 0 0);
+  --button-secondary-hover: oklch(0.98 0.006 85);
+
+  --border-base: oklch(0.2 0.014 60 / 0.16);
+  --border-hover: oklch(0.2 0.014 60 / 0.24);
+  --border-selected: oklch(0.72 0.13 55);
+  --border-focus: oklch(0.72 0.13 55);
+  --border-weak-base: oklch(0.9 0.006 85);
+  --border-weaker-base: oklch(0.94 0.006 85);
+  --border-interactive-base: oklch(0.62 0.11 55);
+  --border-interactive-selected: oklch(0.72 0.13 55);
+  --border-interactive-focus: oklch(0.72 0.13 55);
+
+  --icon-base: oklch(0.55 0.012 75);
+  --icon-active: oklch(0.15 0.014 60);
+  --icon-strong-base: oklch(0.15 0.014 60);
+  --icon-brand-base: oklch(0.15 0.014 60);
+  --icon-interactive-base: oklch(0.62 0.13 55);
+
+  --markdown-heading: oklch(0.58 0.13 55);
+  --markdown-strong: oklch(0.58 0.13 55);
+  --markdown-link: oklch(0.58 0.13 55);
+  --markdown-code: oklch(0.5 0.11 155);
+  --markdown-text: oklch(0.15 0.014 60);
+  --markdown-code-block: oklch(0.15 0.014 60);
+
+  --font-family-sans: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-family-mono: "JetBrainsMono Nerd Font Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, "Liberation Mono", "Courier New", monospace;
+}

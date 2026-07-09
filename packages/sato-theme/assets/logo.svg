@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 96" width="320" height="96">
+  <title>Sato Code</title>
+  <defs>
+    <radialGradient id="ember" cx="0.5" cy="0.55" r="0.6">
+      <stop offset="0" stop-color="oklch(0.86 0.12 55)"/>
+      <stop offset="0.55" stop-color="oklch(0.72 0.13 55)"/>
+      <stop offset="1" stop-color="oklch(0.42 0.09 40)"/>
+    </radialGradient>
+  </defs>
+  <g transform="translate(16 16)">
+    <path d="M32 0 C42 10 46 18 42 28 C40 34 36 38 32 40 C28 38 24 34 22 28 C18 18 22 10 32 0 Z" fill="url(#ember)"/>
+  </g>
+  <g fill="oklch(0.94 0.01 85)" font-family="Fraunces, 'Times New Roman', serif" font-weight="600">
+    <text x="88" y="60" font-size="42" letter-spacing="-0.02em">Sato Code</text>
+  </g>
+</svg>

@@ -1,0 +1,27 @@
+{
+  "name": "@opencode-ai/sato-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sato-branded wrapper around @opencode-ai/app — renders the web UI with the Sato Ember skin, Sato title, and Sato favicon.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "serve": "vite preview"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@opencode-ai/app": "workspace:*",
+    "@opencode-ai/sato-theme": "workspace:*",
+    "@opencode-ai/ui": "workspace:*",
+    "@sentry/solid": "catalog:",
+    "solid-js": "catalog:"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "catalog:",
+    "@types/bun": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plugin-solid": "catalog:"
+  }
+}

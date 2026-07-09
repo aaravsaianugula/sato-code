@@ -1,0 +1,13 @@
+/* Sato-Code web UI stylesheet.
+ *
+ * Order matters:
+ *   1. @opencode-ai/app's own stylesheet (imports @opencode-ai/ui tailwind +
+ *      component CSS + font-faces + upstream v2 tailwind). This defines the
+ *      ORIGINAL CSS custom properties for the "oc-2" theme.
+ *   2. Sato Ember skin — CSS-variable overrides. Because @opencode-ai/ui uses
+ *      cascade layers, our un-layered overrides at the end always beat the
+ *      values coming from @layer theme.
+ */
+
+@import "@opencode-ai/app/index.css";
+@import "@opencode-ai/sato-theme/app-skin/sato.css";

@@ -1,0 +1,18 @@
+{
+  "name": "@opencode-ai/sato-theme",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sato brand skin for Sato-Code: TUI themes, @opencode-ai/ui CSS overrides, logos, favicons.",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": ["./app-skin/sato.css"],
+  "exports": {
+    "./app-skin": "./app-skin/sato.css",
+    "./app-skin/sato.css": "./app-skin/sato.css",
+    "./themes/sato-dark.json": "./themes/sato-dark.json",
+    "./themes/sato-light.json": "./themes/sato-light.json",
+    "./assets/favicon.svg": "./assets/favicon.svg",
+    "./assets/logo.svg": "./assets/logo.svg"
+  },
+  "files": ["themes", "app-skin", "assets", "README.md"]
+}

@@ -1,0 +1,110 @@
+From 8260b4629755d3d661beae63af24ae6977d52dd2 Mon Sep 17 00:00:00 2001
+From: AaravSai Anugula <aaravsai.anugula@gmail.com>
+Date: Wed, 8 Jul 2026 18:43:05 -0700
+Subject: [PATCH] sato: brand user-visible CLI strings + redirect web-UI embed
+ to sato-app
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Files touched (upstream):
+  - packages/opencode/src/index.ts    (+7 -2)   SATO_BRAND scriptName + banner guard
+  - packages/opencode/script/build.ts (+9 -1)   process.env.SATO_BRAND --define + embed-src switch
+
+Why (branding):
+  Sato-Code ships as a distinct product on top of upstream OpenCode. The CLI's
+  yargs scriptName() drives every user-visible help/usage line, and the banner
+  guard in show() decides whether to print the ASCII wordmark. Both hardcode
+  "opencode". A build-time --define replaces process.env.SATO_BRAND with a
+  literal, so the resulting binary uses "Sato Code" for scriptName without
+  needing users to set an env var. The banner guard keeps the original
+  "opencode" prefix check as a fallback so upstream yargs output paths still
+  bypass the logo correctly.
+
+Why (embed redirect):
+  createEmbeddedWebUIBundle() calls `bun run --cwd packages/app build` to
+  rebuild the web UI it embeds. That defeats any pre-build staging that
+  writes to packages/app/dist (upstream's own build overwrites it). When
+  SATO_BRAND is set, redirect that inner build at packages/sato-app instead —
+  a workspace package whose own vite build produces the same dist shape but
+  with the Sato title, favicon, data-theme="sato-dark" default, and the
+  Ember CSS skin already applied.
+
+Fallback:
+  If SATO_BRAND is unset at build time, process.env.SATO_BRAND ?? "opencode"
+  evaluates to "opencode" AND useSato is false — the CLI behaves identically
+  to an unbranded upstream build.
+
+Binary name unchanged:
+  This patch only changes the DISPLAY brand and the embed source. The
+  compiled binary is still dist/<target>/bin/opencode (see build.ts line 183).
+
+Owner: sato-code fork maintainers (@aaravsaianugula)
+Kill-criterion: delete this patch if upstream OpenCode exposes both a "brand
+  name" override (env var or config field) and an "embed-source" override —
+  then Sato just sets those and the +16-line patch collapses to zero.
+---
+ packages/opencode/script/build.ts | 10 +++++++++-
+ packages/opencode/src/index.ts    |  9 +++++++--
+ 2 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+index 236838dbd..87d025b5a 100755
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -26,7 +26,11 @@ const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
+ 
+ const createEmbeddedWebUIBundle = async () => {
+   console.log(`Building Web UI to embed in the binary`)
+-  const appDir = path.join(import.meta.dirname, "../../app")
++  // Sato-Code: when SATO_BRAND is set, embed the Sato-skinned bundle from
++  // packages/sato-app (Sato title/favicon/data-theme + Ember CSS skin).
++  // Falls back to packages/app (upstream) when SATO_BRAND is unset.
++  const useSato = !!process.env.SATO_BRAND
++  const appDir = path.join(import.meta.dirname, useSato ? "../../sato-app" : "../../app")
+   const dist = path.join(appDir, "dist")
+   await $`OPENCODE_CHANNEL=${Script.channel} bun run --cwd ${appDir} build`
+   const files = (await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: dist })))
+@@ -194,6 +198,10 @@ for (const item of targets) {
+       OPENCODE_WORKER_PATH: workerPath,
+       OPENCODE_CHANNEL: `'${Script.channel}'`,
+       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
++      // Sato-Code brand: baked into the binary so scriptName + banner guard
++      // resolve to "Sato Code" without a runtime env var. Falls back to
++      // "opencode" so upstream builds are unchanged.
++      "process.env.SATO_BRAND": `'${process.env.SATO_BRAND ?? "opencode"}'`,
+       ...(item.os === "linux" ? { "process.env.OPENTUI_LIBC": JSON.stringify(item.abi ?? "glibc") } : {}),
+     },
+   })
+diff --git a/packages/opencode/src/index.ts b/packages/opencode/src/index.ts
+index 13540a73a..87af76d3d 100644
+--- a/packages/opencode/src/index.ts
++++ b/packages/opencode/src/index.ts
+@@ -32,9 +32,14 @@ import { Heap } from "./cli/heap"
+ 
+ const args = hideBin(process.argv)
+ 
++// Sato-Code brand: replaced at build time by Bun.build's `--define` when
++// SATO_BRAND is set (see packages/opencode/script/build.ts). Falls back to
++// "opencode" so upstream builds are unchanged.
++const SATO_BRAND: string = process.env.SATO_BRAND ?? "opencode"
++
+ function show(out: string) {
+   const text = out.trimStart()
+-  if (!text.startsWith("opencode ")) {
++  if (!text.startsWith(SATO_BRAND + " ") && !text.startsWith("opencode ")) {
+     process.stderr.write(UI.logo() + EOL + EOL)
+     process.stderr.write(text + EOL)
+     return
+@@ -44,7 +49,7 @@ function show(out: string) {
+ 
+ const cli = yargs(args)
+   .parserConfiguration({ "populate--": true })
+-  .scriptName("opencode")
++  .scriptName(SATO_BRAND)
+   .wrap(100)
+   .help("help", "show help")
+   .alias("help", "h")
+-- 
+2.54.0.windows.1
+

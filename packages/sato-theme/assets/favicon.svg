@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>Sato Code — Ember mark</title>
+  <defs>
+    <radialGradient id="ember" cx="0.5" cy="0.55" r="0.6">
+      <stop offset="0" stop-color="oklch(0.86 0.12 55)"/>
+      <stop offset="0.55" stop-color="oklch(0.72 0.13 55)"/>
+      <stop offset="1" stop-color="oklch(0.42 0.09 40)"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="oklch(0.19 0.014 60)"/>
+  <path d="M32 12 C42 22 46 30 42 40 C40 46 36 50 32 52 C28 50 24 46 22 40 C18 30 22 22 32 12 Z" fill="url(#ember)"/>
+  <path d="M32 26 C36 30 38 34 36 39 C34 43 32 44 30 39 C28 34 30 30 32 26 Z" fill="oklch(0.98 0.02 85)" opacity="0.85"/>
+</svg>
