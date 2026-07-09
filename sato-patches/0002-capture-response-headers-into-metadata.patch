@@ -1,0 +1,107 @@
+From 66042d16cb924d1c168a518f42af7e632588dcc7 Mon Sep 17 00:00:00 2001
+From: AaravSai Anugula <aaravsai.anugula@gmail.com>
+Date: Wed, 8 Jul 2026 17:34:58 -0700
+Subject: [PATCH] sato: capture x-sato-* response headers into
+ TextPart.metadata.sato
+
+Files touched (upstream):
+  - packages/opencode/src/provider/provider.ts       (+7)  fetch wrapper
+  - packages/opencode/src/session/processor.ts       (+8)  text-end attach
+  - packages/opencode/src/provider/sato-headers.ts   (+6)  NEW module-local store
+
+Why:
+  Sato's gateway emits routing / overseer / moderation decisions as x-sato-*
+  response headers. Plugins can inspect message parts but not raw HTTP responses,
+  so a tiny bridge from the fetch layer (where the response lives) to the
+  session processor (where TextPart.metadata is set) is required to surface
+  those headers to the Code UI + plugins. The path is generic: any x-sato-*
+  header set by the gateway shows up as a string on part.metadata.sato, with
+  x-sato-route JSON parsed into metadata.sato.route so plugins can read
+  route.primary / route.mode / route.confidence / route.degraded_from directly.
+
+Allowlist:
+  Only headers matching /^x-sato-/i are captured. Arbitrary upstream headers
+  are never forwarded into part metadata.
+
+Schema:
+  ZERO change. TextPart.metadata is already Record<string, any> and the
+  PartUpdated SSE event broadcasts the whole part, so plugins + app read
+  metadata.sato with no client-side change.
+
+Owner: sato-code fork maintainers (@aaravsaianugula)
+Kill-criterion: delete this patch when upstream OpenCode accepts a generic
+  "surface response headers into part metadata" hook. The two-line bridge
+  in provider.ts + the take() in processor.ts collapse to zero.
+---
+ packages/opencode/src/provider/provider.ts     | 7 +++++++
+ packages/opencode/src/provider/sato-headers.ts | 6 ++++++
+ packages/opencode/src/session/processor.ts     | 8 ++++++++
+ 3 files changed, 21 insertions(+)
+ create mode 100644 packages/opencode/src/provider/sato-headers.ts
+
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index c979fc446..62827851c 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -31,6 +31,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
+ import { ModelStatus } from "./model-status"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { ProviderError } from "./error"
++import { SatoResponseHeaders } from "./sato-headers"
+ 
+ const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
+ 
+@@ -1733,6 +1734,12 @@ const layer = Layer.effect(
+             timeout: false,
+           }).finally(() => headerTimeoutCtl?.clear())
+ 
++          // sato: capture allowlisted x-sato-* response headers, keyed by session id from outgoing request
++          const satoCap: Record<string, string> = {}
++          res.headers.forEach((v, k) => { if (k.toLowerCase().startsWith("x-sato-")) satoCap[k.toLowerCase()] = v })
++          const satoH = opts.headers as any
++          const satoSid = satoH?.get?.("x-session-affinity") ?? satoH?.["x-session-affinity"] ?? satoH?.["X-Session-Id"] ?? satoH?.["x-session-id"]
++          if (satoSid && Object.keys(satoCap).length) SatoResponseHeaders.set(satoSid, satoCap)
+           if (!chunkAbortCtl) return res
+           return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+         }
+diff --git a/packages/opencode/src/provider/sato-headers.ts b/packages/opencode/src/provider/sato-headers.ts
+new file mode 100644
+index 000000000..2b475d976
+--- /dev/null
++++ b/packages/opencode/src/provider/sato-headers.ts
+@@ -0,0 +1,6 @@
++// Sato fork: per-session x-sato-* response header capture (see sato-patches/0002)
++const s = new Map<string, Record<string, string>>()
++export const SatoResponseHeaders = {
++  set(id: string, h: Record<string, string>) { s.set(id, { ...(s.get(id) ?? {}), ...h }) },
++  take(id: string): Record<string, string> | undefined { const v = s.get(id); s.delete(id); return v },
++}
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 20aa8a840..84dce1f17 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -19,6 +19,7 @@ import { SessionRetry } from "./retry"
+ import { SessionStatus } from "./status"
+ import { SessionSummary } from "./summary"
+ import type { Provider } from "@/provider/provider"
++import { SatoResponseHeaders } from "@/provider/sato-headers"
+ import { Question } from "@/question"
+ import { errorMessage } from "@/util/error"
+ import { isRecord } from "@/util/record"
+@@ -527,6 +528,13 @@ const layer = Layer.effect(
+               ctx.currentText.time = { start: ctx.currentText.time?.start ?? end, end }
+             }
+             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
++            // sato: attach x-sato-* headers into metadata.sato (x-sato-route parsed to metadata.sato.route)
++            const satoHdr = SatoResponseHeaders.take(ctx.sessionID)
++            if (satoHdr) {
++              let route: unknown
++              try { if (satoHdr["x-sato-route"]) route = JSON.parse(satoHdr["x-sato-route"]) } catch {}
++              ctx.currentText.metadata = { ...(ctx.currentText.metadata ?? {}), sato: { ...satoHdr, ...(route ? { route } : {}) } }
++            }
+             yield* session.updatePart(ctx.currentText)
+             ctx.currentText = undefined
+             return
+-- 
+2.54.0.windows.1
+
